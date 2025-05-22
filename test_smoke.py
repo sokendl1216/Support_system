@@ -69,22 +69,20 @@ def test_ai():
     try:
         from ai.agent_base import BaseAgent, LLMClient
         from ai.orchestrator import AgentOrchestrator
+        from ai.llm_oss_client import OSSLLMClient
         # ダミーLLMクライアントとエージェントのテスト実装
-        class DummyLLM(LLMClient):
-            def generate(self, prompt: str) -> str:
-                return "dummy-response"
         class DummyAgent(BaseAgent):
             def run(self, input_data):
                 return "dummy-agent-result"
-        llm = DummyLLM()
+        llm = OSSLLMClient()
         agent = DummyAgent()
         orchestrator = AgentOrchestrator([agent])
-        assert llm.generate("test") == "dummy-response"
+        assert llm.generate("test") == "[OSS LLM] test"
         assert agent.run("test") == "dummy-agent-result"
         assert orchestrator.run_all("test") == ["dummy-agent-result"]
-        print("ai.agent_base/LLMClient/AgentOrchestrator: OK")
+        print("ai.agent_base/LLMClient/OSSLLMClient/AgentOrchestrator: OK")
     except Exception as e:
-        print("ai.agent_base/LLMClient/AgentOrchestrator: NG", e)
+        print("ai.agent_base/LLMClient/OSSLLMClient/AgentOrchestrator: NG", e)
         traceback.print_exc()
 
 if __name__ == "__main__":
