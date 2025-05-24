@@ -1,12 +1,14 @@
-# Enhanced configuration management system
+"""
+設定管理システム
 
-import os
+マルチソース設定読み込み、バリデーション、優先度処理を提供します。
+"""
 import json
-import yaml
+import os
 import logging
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
-from dataclasses import dataclass, field
+from typing import Dict, Any, List, Optional
+from dataclasses import dataclass
 from enum import Enum
 
 logger = logging.getLogger(__name__)
@@ -19,72 +21,69 @@ class ConfigFormat(Enum):
 
 @dataclass
 class ConfigSource:
-    """設定ソース情報"""
+    """設定ソース定義"""
     path: str
     format: ConfigFormat
-    priority: int = 0  # 高い値が優先
+    priority: int = 1
     required: bool = False
-    
-@dataclass 
+
+@dataclass
 class ConfigValue:
-    """設定値の詳細情報"""
+    """設定値とメタデータ"""
     value: Any
     source: str
-    validated: bool = False
-    default: Any = None
 
 class ConfigValidator:
-    """設定値の検証クラス"""
+    """設定値の検証"""
     
-    @staticmethod
-    def validate_database_config(config: Dict[str, Any]) -> bool:
+    def validate_database_config(self, config: Dict[str, Any]) -> bool:
         """データベース設定の検証"""
-        required_keys = ["host", "port", "database", "username"]
-        return all(key in config for key in required_keys)
+        required_fields = ["url"]
+        # urlがない場合は、host, port, database, usernameで構成されるかチェック
+        if "url" not in config:
+            alt_required = ["host", "database", "username"]
+            return all(field in config for field in alt_required)
+        return all(field in config for field in required_fields)
     
-    @staticmethod
-    def validate_api_config(config: Dict[str, Any]) -> bool:
+    def validate_api_config(self, config: Dict[str, Any]) -> bool:
         """API設定の検証"""
         if "port" in config:
-            try:
-                port = int(config["port"])
-                return 1 <= port <= 65535
-            except (ValueError, TypeError):
+            port = config["port"]
+            if not isinstance(port, int) or port < 1 or port > 65535:
                 return False
         return True
     
-    @staticmethod
-    def validate_ai_config(config: Dict[str, Any]) -> bool:
+    def validate_ai_config(self, config: Dict[str, Any]) -> bool:
         """AI設定の検証"""
         if "ollama" in config:
             ollama_config = config["ollama"]
             if "base_url" in ollama_config:
-                return ollama_config["base_url"].startswith(("http://", "https://"))
+                url = ollama_config["base_url"]
+                # 基本的なURL形式の検証
+                if not (url.startswith("http://") or url.startswith("https://")):
+                    return False
         return True
 
 class SettingsManager:
-    """包括的な設定管理システム"""
+    """設定管理マネージャー"""
     
-    def __init__(self, base_path: Optional[str] = None):
-        self.base_path = Path(base_path) if base_path else Path.cwd()
+    def __init__(self, base_path: Optional[Path] = None):
+        self.base_path = base_path or Path.cwd()
         self.config_sources: List[ConfigSource] = []
         self.config_data: Dict[str, ConfigValue] = {}
-        self.manual_settings: Dict[str, ConfigValue] = {}  # 手動設定を分離
         self.validator = ConfigValidator()
         self._loaded = False
         
-        # デフォルト設定ソースを追加
+        # デフォルトの設定ソースを追加
         self._add_default_sources()
     
     def _add_default_sources(self):
         """デフォルトの設定ソースを追加"""
-        # 優先度: 環境変数 > local.json > config.yaml > config.json
         default_sources = [
             ConfigSource("config.json", ConfigFormat.JSON, priority=1),
             ConfigSource("config.yaml", ConfigFormat.YAML, priority=2),
             ConfigSource("local.json", ConfigFormat.JSON, priority=3),
-            ConfigSource("ENV", ConfigFormat.ENV, priority=4)
-        ]
+            ConfigSource("ENV", ConfigFormat.ENV, priority=4)        ]
         
         for source in default_sources:
             self.add_config_source(source)
@@ -96,19 +95,19 @@ class SettingsManager:
         self.config_sources.sort(key=lambda s: s.priority)
     
     def load_configs(self) -> bool:
-        """すべての設定ファイルを読み込み（手動設定は保持）"""
+        """すべての設定ファイルを読み込み"""
         try:
-            # 手動設定を保存
-            saved_manual = self.manual_settings.copy()
+            # 手動設定を保持
+            manual_configs = {k: v for k, v in self.config_data.items() if v.source == "manual"}
             
-            # ファイルベースの設定をクリア
+            # 既存の設定をクリア
             self.config_data.clear()
             
             for source in self.config_sources:
                 self._load_single_source(source)
             
-            # 手動設定を復元
-            self.manual_settings = saved_manual
+            # 手動設定を復元（最高優先度）
+            self.config_data.update(manual_configs)
             
             # 設定値の検証
             self._validate_configs()
@@ -175,12 +174,17 @@ class SettingsManager:
     def _load_yaml_config(self, file_path: Path, source: ConfigSource):
         """YAML設定ファイルを読み込み"""
         try:
+            import yaml
             with open(file_path, 'r', encoding='utf-8') as f:
                 data = yaml.safe_load(f)
                 if data:
                     self._merge_config_data(data, source.path)
         except ImportError:
             logger.warning("PyYAML not installed, skipping YAML config files")
+        except Exception as e:
+            logger.error(f"Error reading YAML file {file_path}: {e}")
+            if source.required:
+                raise
     
     def _load_env_config(self, source: ConfigSource):
         """環境変数から設定を読み込み"""
@@ -256,51 +260,43 @@ class SettingsManager:
     
     def _validate_configs(self):
         """設定値の検証"""
-        try:
-            # データベース設定の検証
-            db_config = self._get_section_data("database")
-            if db_config and not self.validator.validate_database_config(db_config):
-                logger.warning("Invalid database configuration")
-            
-            # API設定の検証
-            api_config = self._get_section_data("api")
-            if api_config and not self.validator.validate_api_config(api_config):
-                logger.warning("Invalid API configuration")
-            
-            # AI設定の検証
-            ai_config = self._get_section_data("ai")
-            if ai_config and not self.validator.validate_ai_config(ai_config):
-                logger.warning("Invalid AI configuration")
-        except Exception as e:
-            logger.error(f"Error during config validation: {e}")
+        # バリデーションは既にロードされた設定に対してのみ実行
+        # データベース設定の検証
+        db_config = self._get_section_data("database")
+        if db_config and not self.validator.validate_database_config(db_config):
+            logger.warning("Invalid database configuration")
+        
+        # API設定の検証
+        api_config = self._get_section_data("api")
+        if api_config and not self.validator.validate_api_config(api_config):
+            logger.warning("Invalid API configuration")
+        
+        # AI設定の検証
+        ai_config = self._get_section_data("ai")
+        if ai_config and not self.validator.validate_ai_config(ai_config):
+            logger.warning("Invalid AI configuration")
     
     def _get_section_data(self, section: str) -> Dict[str, Any]:
-        """内部的なセクションデータ取得（再帰を回避）"""
+        """設定セクションを取得（内部用、再帰を避ける）"""
         section_data = {}
         prefix = f"{section}."
         
-        # 手動設定から取得
-        for key, config_value in self.manual_settings.items():
-            if key.startswith(prefix):
-                nested_key = key[len(prefix):]
-                section_data[nested_key] = config_value.value
-        
-        # ファイルベースの設定から取得
         for key, config_value in self.config_data.items():
             if key.startswith(prefix):
-                nested_key = key[len(prefix):]
-                if nested_key not in section_data:  # 手動設定が優先
-                    section_data[nested_key] = config_value.value
+                # セクションプレフィックスを除去
+                sub_key = key[len(prefix):]
+                section_data[sub_key] = config_value.value
+            elif key == section:
+                # セクション自体が値の場合
+                if isinstance(config_value.value, dict):
+                    section_data.update(config_value.value)
+                else:
+                    section_data[section] = config_value.value
         
         return section_data
     
     def get(self, key: str, default: Any = None) -> Any:
-        """設定値を取得（手動設定が最優先）"""
-        # 手動設定を最初にチェック
-        if key in self.manual_settings:
-            return self.manual_settings[key].value
-        
-        # 初回アクセス時に設定をロード
+        """設定値を取得"""
         if not self._loaded:
             try:
                 self.load_configs()
@@ -308,10 +304,8 @@ class SettingsManager:
                 logger.error(f"Failed to load configs on first access: {e}")
                 return default
         
-        # ファイルベースの設定をチェック
         if key in self.config_data:
             return self.config_data[key].value
-        
         return default
     
     def get_section(self, section: str) -> Dict[str, Any]:
@@ -323,115 +317,125 @@ class SettingsManager:
                 logger.error(f"Failed to load configs on section access: {e}")
                 return {}
         
-        return self._get_section_data(section)
-    
-    def set(self, key: str, value: Any, source: str = "runtime"):
-        """設定値を動的に設定（最高優先度）"""
-        self.manual_settings[key] = ConfigValue(
-            value=value,
-            source=source
-        )
+        section_data = {}
+        prefix = f"{section}."
         
-        # 初回設定時に必要に応じて設定をロード
+        for key, config_value in self.config_data.items():
+            if key.startswith(prefix):
+                # セクションプレフィックスを除去
+                sub_key = key[len(prefix):]
+                section_data[sub_key] = config_value.value
+            elif key == section:
+                # セクション自体が値の場合
+                if isinstance(config_value.value, dict):
+                    section_data.update(config_value.value)
+                else:
+                    section_data[section] = config_value.value
+          return section_data
+    
+    def get_info(self, key: str) -> Optional[ConfigValue]:
+        """設定値の詳細情報を取得"""
         if not self._loaded:
             try:
                 self.load_configs()
             except Exception as e:
-                logger.error(f"Failed to load configs during set operation: {e}")
+                logger.error(f"Failed to load configs on info access: {e}")
+                return None
+        
+        if key in self.config_data:
+            return self.config_data[key]
+        return None
     
-    def get_info(self, key: str) -> Optional[ConfigValue]:
-        """設定値の詳細情報を取得"""
-        # 手動設定を最初にチェック
-        if key in self.manual_settings:
-            return self.manual_settings[key]
-        
+    def set(self, key: str, value: Any, source: str = "manual"):
+        """設定値を手動で設定"""
+        self.config_data[key] = ConfigValue(value=value, source=source)
+        # 初期設定がまだ読み込まれていない場合、読み込みを行う
         if not self._loaded:
-            self.load_configs()
-        
-        return self.config_data.get(key)
-    
-    def list_all_configs(self) -> Dict[str, ConfigValue]:
-        """すべての設定値を取得"""
-        if not self._loaded:
-            self.load_configs()
-        
-        # ファイルベースの設定から開始
-        all_configs = self.config_data.copy()
-        
-        # 手動設定で上書き
-        all_configs.update(self.manual_settings)
-        
-        return all_configs
+            try:
+                # 手動設定を一時保存
+                manual_configs = {k: v for k, v in self.config_data.items() if v.source == "manual"}
+                self.load_configs()
+                # 手動設定を復元
+                self.config_data.update(manual_configs)
+            except Exception as e:
+                logger.error(f"Failed to load configs during manual set: {e}")
     
     def reload(self) -> bool:
         """設定を再読み込み"""
+        self._loaded = False
         return self.load_configs()
-
-# レガシー互換性のためのSettings クラス
-class Settings:
-    """レガシー互換性のための設定クラス"""
     
+    def get_config_info(self) -> Dict[str, Any]:
+        """設定情報を取得"""
+        if not self._loaded:
+            self.load_configs()
+        
+        info = {
+            "sources": [
+                {
+                    "path": source.path,
+                    "format": source.format.value,
+                    "priority": source.priority,
+                    "required": source.required
+                }
+                for source in self.config_sources
+            ],
+            "loaded_values": len(self.config_data),
+            "config_keys": list(self.config_data.keys())
+        }
+        
+        return info
+
+# レガシークラスとの互換性のため
+class Settings:
+    """レガシー設定クラス（互換性のため）"""
     def __init__(self):
-        self.manager = SettingsManager()
-        self.manager.load_configs()
+        self._manager = SettingsManager()
+    
+    def get(self, key: str, default: Any = None) -> Any:
+        return self._manager.get(key, default)
     
     @property
     def env(self) -> str:
-        return self.manager.get("environment", "development")
+        return self._manager.get("environment", "development")
     
     @property
     def debug(self) -> bool:
-        return self.manager.get("debug", True)
-    
-    @property
-    def database_url(self) -> str:
-        return self.manager.get("database.url", "sqlite:///app.db")
+        return self._manager.get("debug", False)
     
     @property
     def api_port(self) -> int:
-        return self.manager.get("api.port", 8000)
-    
-    @property
-    def ollama_base_url(self) -> str:
-        return self.manager.get("ai.ollama.base_url", "http://localhost:11434")
-    
-    @property
-    def ollama_model(self) -> str:
-        return self.manager.get("ai.ollama.model", "llama2")
+        return self._manager.get("api.port", 8000)
 
-# レガシー互換性クラス
-class DatabaseSettings:
-    def __init__(self, manager: SettingsManager):
-        self.manager = manager
-    
-    @property
-    def host(self) -> str:
-        return self.manager.get("database.host", "localhost")
-    
-    @property
-    def port(self) -> int:
-        return self.manager.get("database.port", 5432)
-    
-    @property
-    def database(self) -> str:
-        return self.manager.get("database.database", "app")
-    
-    @property
-    def username(self) -> str:
-        return self.manager.get("database.username", "user")
+class AppSettings(Settings):
+    """アプリケーション設定クラス（互換性のため）"""
+    pass
 
-class AISettings:
-    def __init__(self, manager: SettingsManager):
-        self.manager = manager
+class DatabaseSettings(Settings):
+    """データベース設定クラス（互換性のため）"""
+    def __init__(self):
+        super().__init__()
     
     @property
-    def ollama_base_url(self) -> str:
-        return self.manager.get("ai.ollama.base_url", "http://localhost:11434")
+    def url(self) -> str:
+        return self._manager.get("database.url", "sqlite:///app.db")
     
     @property
-    def ollama_model(self) -> str:
-        return self.manager.get("ai.ollama.model", "llama2")
+    def echo(self) -> bool:
+        return self._manager.get("database.echo", False)
 
-# グローバル設定インスタンス
-settings = Settings()
+class AISettings(Settings):
+    """AI設定クラス（互換性のため）"""
+    def __init__(self):
+        super().__init__()
+    
+    @property
+    def default_model(self) -> str:
+        return self._manager.get("ai.default_model", "gpt-3.5-turbo")
+    
+    @property
+    def timeout(self) -> int:
+        return self._manager.get("ai.timeout", 30)
+
+# グローバル設定マネージャーインスタンス
 settings_manager = SettingsManager()

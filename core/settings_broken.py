@@ -69,7 +69,6 @@ class SettingsManager:
         self.base_path = Path(base_path) if base_path else Path.cwd()
         self.config_sources: List[ConfigSource] = []
         self.config_data: Dict[str, ConfigValue] = {}
-        self.manual_settings: Dict[str, ConfigValue] = {}  # 手動設定を分離
         self.validator = ConfigValidator()
         self._loaded = False
         
@@ -96,19 +95,13 @@ class SettingsManager:
         self.config_sources.sort(key=lambda s: s.priority)
     
     def load_configs(self) -> bool:
-        """すべての設定ファイルを読み込み（手動設定は保持）"""
+        """すべての設定ファイルを読み込み"""
         try:
-            # 手動設定を保存
-            saved_manual = self.manual_settings.copy()
-            
-            # ファイルベースの設定をクリア
+            # 既存の設定をクリア
             self.config_data.clear()
             
             for source in self.config_sources:
                 self._load_single_source(source)
-            
-            # 手動設定を復元
-            self.manual_settings = saved_manual
             
             # 設定値の検証
             self._validate_configs()
@@ -192,15 +185,14 @@ class SettingsManager:
                 # ネストした設定キーをサポート（例：APP_DB_HOST -> db.host）
                 nested_key = config_key.replace('_', '.')
                 self._set_nested_value(nested_key, value, source.path)
-    
-    def _merge_config_data(self, data: Dict[str, Any], source_name: str):
+      def _merge_config_data(self, data: Dict[str, Any], source_name: str):
         """設定データをマージ"""
         if isinstance(data, dict):
             self._flatten_and_store(data, source_name)
         else:
             logger.warning(f"Invalid config data format from {source_name}, expected dict, got {type(data)}")
     
-    def _flatten_and_store(self, data: Dict[str, Any], source_name: str, prefix: str = "", max_depth: int = 10):
+      def _flatten_and_store(self, data: Dict[str, Any], source_name: str, prefix: str = "", max_depth: int = 10):
         """ネストした設定データを平坦化して保存"""
         if max_depth <= 0:
             logger.warning(f"Maximum nesting depth reached for {prefix}, skipping further nesting")
@@ -256,51 +248,22 @@ class SettingsManager:
     
     def _validate_configs(self):
         """設定値の検証"""
-        try:
-            # データベース設定の検証
-            db_config = self._get_section_data("database")
-            if db_config and not self.validator.validate_database_config(db_config):
-                logger.warning("Invalid database configuration")
-            
-            # API設定の検証
-            api_config = self._get_section_data("api")
-            if api_config and not self.validator.validate_api_config(api_config):
-                logger.warning("Invalid API configuration")
-            
-            # AI設定の検証
-            ai_config = self._get_section_data("ai")
-            if ai_config and not self.validator.validate_ai_config(ai_config):
-                logger.warning("Invalid AI configuration")
-        except Exception as e:
-            logger.error(f"Error during config validation: {e}")
-    
-    def _get_section_data(self, section: str) -> Dict[str, Any]:
-        """内部的なセクションデータ取得（再帰を回避）"""
-        section_data = {}
-        prefix = f"{section}."
+        # データベース設定の検証
+        db_config = self.get_section("database")
+        if db_config and not self.validator.validate_database_config(db_config):
+            logger.warning("Invalid database configuration")
         
-        # 手動設定から取得
-        for key, config_value in self.manual_settings.items():
-            if key.startswith(prefix):
-                nested_key = key[len(prefix):]
-                section_data[nested_key] = config_value.value
+        # API設定の検証
+        api_config = self.get_section("api")
+        if api_config and not self.validator.validate_api_config(api_config):
+            logger.warning("Invalid API configuration")
         
-        # ファイルベースの設定から取得
-        for key, config_value in self.config_data.items():
-            if key.startswith(prefix):
-                nested_key = key[len(prefix):]
-                if nested_key not in section_data:  # 手動設定が優先
-                    section_data[nested_key] = config_value.value
-        
-        return section_data
-    
-    def get(self, key: str, default: Any = None) -> Any:
-        """設定値を取得（手動設定が最優先）"""
-        # 手動設定を最初にチェック
-        if key in self.manual_settings:
-            return self.manual_settings[key].value
-        
-        # 初回アクセス時に設定をロード
+        # AI設定の検証
+        ai_config = self.get_section("ai")
+        if ai_config and not self.validator.validate_ai_config(ai_config):
+            logger.warning("Invalid AI configuration")
+      def get(self, key: str, default: Any = None) -> Any:
+        """設定値を取得"""
         if not self._loaded:
             try:
                 self.load_configs()
@@ -308,10 +271,8 @@ class SettingsManager:
                 logger.error(f"Failed to load configs on first access: {e}")
                 return default
         
-        # ファイルベースの設定をチェック
         if key in self.config_data:
             return self.config_data[key].value
-        
         return default
     
     def get_section(self, section: str) -> Dict[str, Any]:
@@ -323,45 +284,32 @@ class SettingsManager:
                 logger.error(f"Failed to load configs on section access: {e}")
                 return {}
         
-        return self._get_section_data(section)
+        section_data = {}
+        prefix = f"{section}."
+        
+        for key, config_value in self.config_data.items():
+            if key.startswith(prefix):
+                nested_key = key[len(prefix):]
+                section_data[nested_key] = config_value.value
+        
+        return section_data
     
     def set(self, key: str, value: Any, source: str = "runtime"):
-        """設定値を動的に設定（最高優先度）"""
-        self.manual_settings[key] = ConfigValue(
+        """設定値を動的に設定"""
+        self.config_data[key] = ConfigValue(
             value=value,
             source=source
         )
-        
-        # 初回設定時に必要に応じて設定をロード
-        if not self._loaded:
-            try:
-                self.load_configs()
-            except Exception as e:
-                logger.error(f"Failed to load configs during set operation: {e}")
     
     def get_info(self, key: str) -> Optional[ConfigValue]:
         """設定値の詳細情報を取得"""
-        # 手動設定を最初にチェック
-        if key in self.manual_settings:
-            return self.manual_settings[key]
-        
-        if not self._loaded:
-            self.load_configs()
-        
         return self.config_data.get(key)
     
     def list_all_configs(self) -> Dict[str, ConfigValue]:
         """すべての設定値を取得"""
         if not self._loaded:
             self.load_configs()
-        
-        # ファイルベースの設定から開始
-        all_configs = self.config_data.copy()
-        
-        # 手動設定で上書き
-        all_configs.update(self.manual_settings)
-        
-        return all_configs
+        return self.config_data.copy()
     
     def reload(self) -> bool:
         """設定を再読み込み"""
@@ -390,39 +338,6 @@ class Settings:
     @property
     def api_port(self) -> int:
         return self.manager.get("api.port", 8000)
-    
-    @property
-    def ollama_base_url(self) -> str:
-        return self.manager.get("ai.ollama.base_url", "http://localhost:11434")
-    
-    @property
-    def ollama_model(self) -> str:
-        return self.manager.get("ai.ollama.model", "llama2")
-
-# レガシー互換性クラス
-class DatabaseSettings:
-    def __init__(self, manager: SettingsManager):
-        self.manager = manager
-    
-    @property
-    def host(self) -> str:
-        return self.manager.get("database.host", "localhost")
-    
-    @property
-    def port(self) -> int:
-        return self.manager.get("database.port", 5432)
-    
-    @property
-    def database(self) -> str:
-        return self.manager.get("database.database", "app")
-    
-    @property
-    def username(self) -> str:
-        return self.manager.get("database.username", "user")
-
-class AISettings:
-    def __init__(self, manager: SettingsManager):
-        self.manager = manager
     
     @property
     def ollama_base_url(self) -> str:
