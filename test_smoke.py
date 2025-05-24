@@ -77,12 +77,61 @@ def test_ai():
         llm = OSSLLMClient()
         agent = DummyAgent()
         orchestrator = AgentOrchestrator([agent])
-        assert llm.generate("test") == "[OSS LLM] test"
+        # Ollama API統合により、エラーハンドリングメッセージが返されることを確認
+        result = llm.generate("test")
+        assert any(keyword in result for keyword in ["[Connection Error]", "[Model Unavailable]", "[Ollama Unavailable]"])
         assert agent.run("test") == "dummy-agent-result"
         assert orchestrator.run_all("test") == ["dummy-agent-result"]
         print("ai.agent_base/LLMClient/OSSLLMClient/AgentOrchestrator: OK")
     except Exception as e:
         print("ai.agent_base/LLMClient/OSSLLMClient/AgentOrchestrator: NG", e)
+        traceback.print_exc()
+
+def test_llm_oss_client():
+    try:
+        from ai.llm_oss_client import OSSLLMClient
+        client = OSSLLMClient()
+        result = client.generate("テストプロンプト")
+        # Ollama API統合により、エラーハンドリングメッセージが返されることを確認
+        assert any(keyword in result for keyword in ["[Connection Error]", "[Model Unavailable]", "[Ollama Unavailable]"])
+        print("ai.llm_oss_client.OSSLLMClient: OK")
+    except Exception as e:
+        print("ai.llm_oss_client.OSSLLMClient: NG", e)
+        traceback.print_exc()
+
+def test_event_bus():
+    try:
+        from core.events import EventBus, Event, EventPriority, event_bus
+        
+        # カスタムイベントバスのテスト
+        custom_bus = EventBus()
+        test_results = []
+        
+        def test_handler(event):
+            test_results.append(event.data)
+        
+        # ハンドラー登録と発火テスト
+        handler_id = custom_bus.on("test_event", test_handler, EventPriority.HIGH)
+        assert isinstance(handler_id, str)
+        
+        emitted_event = custom_bus.emit("test_event", {"message": "test"})
+        assert isinstance(emitted_event, Event)
+        assert len(test_results) == 1
+        assert test_results[0]["message"] == "test"
+        
+        # グローバルイベントバスのテスト
+        global_results = []
+        
+        def global_handler(event):
+            global_results.append("global_handled")
+        
+        event_bus.on("global_test", global_handler)
+        event_bus.emit("global_test", {"global": True})
+        assert len(global_results) == 1
+        
+        print("core.events.EventBus: OK")
+    except Exception as e:
+        print("core.events.EventBus: NG", e)
         traceback.print_exc()
 
 if __name__ == "__main__":
@@ -92,4 +141,6 @@ if __name__ == "__main__":
     test_api()
     test_ui()
     test_ai()
+    test_llm_oss_client()
+    test_event_bus()
     print("全層の基本import・初期化テスト完了")

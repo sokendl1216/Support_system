@@ -1,0 +1,45 @@
+{
+  "environment": "development",
+  "debug": true,
+  "api": {
+    "host": "localhost",
+    "port": 8000,
+    "cors_origins": ["http://localhost:3000", "http://localhost:8080"],
+    "rate_limit": {
+      "enabled": true,
+      "requests_per_minute": 100
+    }
+  },
+  "database": {
+    "url": "sqlite:///app.db",
+    "pool_size": 5,
+    "echo": false
+  },
+  "ai": {
+    "ollama": {
+      "base_url": "http://localhost:11434",
+      "model": "llama2",
+      "timeout": 30
+    },
+    "default_mode": "creative",
+    "max_history": 1000
+  },
+  "logging": {
+    "level": "INFO",
+    "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    "file": "logs/app.log",
+    "max_size": "10MB",
+    "backup_count": 5
+  },
+  "ui": {
+    "title": "仕事支援AIシステム",
+    "theme": "light",
+    "language": "ja",
+    "auto_save": true
+  },
+  "security": {
+    "secret_key": "your-secret-key-here",
+    "token_expiry": 3600,
+    "password_min_length": 8
+  }
+}

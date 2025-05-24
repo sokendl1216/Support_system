@@ -1,0 +1,23 @@
+# Local development overrides
+# This file should not be committed to version control
+{
+  "debug": true,
+  "api": {
+    "port": 8001,
+    "cors_origins": ["*"]
+  },
+  "database": {
+    "url": "sqlite:///dev.db",
+    "echo": true
+  },
+  "ai": {
+    "ollama": {
+      "base_url": "http://localhost:11434",
+      "model": "mistral"
+    }
+  },
+  "logging": {
+    "level": "DEBUG",
+    "file": "logs/dev.log"
+  }
+}
