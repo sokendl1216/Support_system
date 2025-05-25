@@ -1,5 +1,5 @@
 """
-Ollamaプロバイダー実装 - OSSモデルを統一インターフェースで提供
+Ollamaプロバイダー実装 - OSSモデルを統一インターフェースで提供（セッション管理修正版）
 
 このモジュールは、Ollama APIを通じてOSSモデルへのアクセスを提供します。
 DeepSeek, Llama, Mistral, CodeLlama等の無料モデルをサポートします。
@@ -11,6 +11,8 @@ import logging
 import time
 from typing import Optional, Dict, List, Any, AsyncGenerator
 import json
+from dataclasses import dataclass
+from pathlib import Path
 
 from ai.llm_service import (
     LLMProvider, ModelInfo, ModelType, ModelCapability,
@@ -19,10 +21,19 @@ from ai.llm_service import (
 
 logger = logging.getLogger(__name__)
 
+@dataclass
+class RetryConfig:
+    """リトライ設定"""
+    max_retries: int = 3
+    initial_delay: float = 1.0
+    max_delay: float = 10.0
+    backoff_multiplier: float = 2.0
+    timeout_multiplier: float = 1.5
+
 class OllamaProvider(LLMProvider):
-    """Ollama API統合プロバイダー"""
+    """Ollama API統合プロバイダー（セッション管理修正版）"""
     
-    def __init__(self, base_url: str = "http://localhost:11434", timeout: int = 30, model_config: Optional[Dict[str, Any]] = None):
+    def __init__(self, base_url: str = "http://localhost:11434", timeout: int = 60, model_config: Optional[Dict[str, Any]] = None):
         self.base_url = base_url.rstrip('/')
         self.timeout = timeout
         self.model_config = model_config or {}
@@ -30,6 +41,15 @@ class OllamaProvider(LLMProvider):
         self._cache_time: Optional[float] = None
         self._cache_ttl = 300  # 5分間のキャッシュ
         self._actual_models_cache: Optional[List[str]] = None
+        
+        # リトライ設定
+        self.retry_config = RetryConfig(
+            max_retries=3,
+            initial_delay=1.0,
+            max_delay=10.0,
+            backoff_multiplier=2.0,
+            timeout_multiplier=1.5
+        )
         
         # OSSモデルの定義
         self._model_definitions = {
@@ -93,6 +113,26 @@ class OllamaProvider(LLMProvider):
             )
         }
     
+    async def _make_request(self, method: str, endpoint: str, **kwargs) -> aiohttp.ClientResponse:
+        """統一されたHTTPリクエストメソッド"""
+        url = f"{self.base_url}{endpoint}"
+        timeout = aiohttp.ClientTimeout(total=kwargs.pop('timeout', self.timeout))
+        
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.request(method, url, **kwargs) as response:
+                return response
+    
+    def _load_oss_model_config(self) -> Dict[str, Any]:
+        """OSS モデル設定ファイルの読み込み"""
+        try:
+            config_path = Path(__file__).parent.parent.parent / "config" / "ollama_models.json"
+            if config_path.exists():
+                with open(config_path, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+        except Exception as e:
+            print(f"OSS model config loading failed: {e}")
+        return {}
+    
     async def generate(self, request: GenerationRequest) -> GenerationResponse:
         """テキスト生成"""
         start_time = time.time()
@@ -126,12 +166,8 @@ class OllamaProvider(LLMProvider):
             }
             
             # API呼び出し
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    f"{self.base_url}/api/generate",
-                    json=data,
-                    timeout=aiohttp.ClientTimeout(total=self.timeout)
-                ) as response:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=self.timeout)) as session:
+                async with session.post(f"{self.base_url}/api/generate", json=data) as response:
                     
                     if response.status != 200:
                         error_text = await response.text()
@@ -189,12 +225,8 @@ class OllamaProvider(LLMProvider):
                 "options": self._build_options(request.config)
             }
             
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    f"{self.base_url}/api/generate",
-                    json=data,
-                    timeout=aiohttp.ClientTimeout(total=self.timeout)
-                ) as response:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=self.timeout)) as session:
+                async with session.post(f"{self.base_url}/api/generate", json=data) as response:
                     
                     if response.status != 200:
                         yield f"[ERROR] API エラー: {response.status}"
@@ -225,11 +257,8 @@ class OllamaProvider(LLMProvider):
     async def is_healthy(self) -> bool:
         """ヘルスチェック"""
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(
-                    f"{self.base_url}/api/tags",
-                    timeout=aiohttp.ClientTimeout(total=5)
-                ) as response:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=5)) as session:
+                async with session.get(f"{self.base_url}/api/tags") as response:
                     return response.status == 200
         except:
             return False
@@ -243,13 +272,11 @@ class OllamaProvider(LLMProvider):
             return self._actual_models_cache
         
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(
-                    f"{self.base_url}/api/tags",
-                    timeout=aiohttp.ClientTimeout(total=5)
-                ) as response:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=5)) as session:
+                async with session.get(f"{self.base_url}/api/tags") as response:
                     
                     if response.status != 200:
+                        print(f"モデル一覧取得失敗: ステータス {response.status}")
                         return []
                     
                     result = await response.json()
@@ -262,15 +289,15 @@ class OllamaProvider(LLMProvider):
                     return models
                     
         except Exception as e:
-            logger.error(f"モデル一覧取得エラー: {e}")
+            print(f"モデル一覧取得エラー: {e}")
             return []
     
     async def _find_actual_model_name(self, config_name: str) -> Optional[str]:
         """設定ファイルのモデル名から実際のOllamaモデル名を検索"""
         # まず利用可能なモデルを取得
-        await self.get_available_models()
+        models = await self.get_available_models()
         
-        if not self._actual_models_cache:
+        if not models:
             return None
         
         # 設定から該当モデルのパターンを取得
@@ -279,7 +306,7 @@ class OllamaProvider(LLMProvider):
         
         # パターンマッチング
         for pattern in patterns:
-            for actual_model in self._actual_models_cache:
+            for actual_model in models:
                 if pattern.lower() in actual_model.lower():
                     return actual_model
         
@@ -288,9 +315,9 @@ class OllamaProvider(LLMProvider):
     async def _select_best_model(self) -> Optional[str]:
         """最適なモデルを自動選択（設定ファイルの優先度を考慮）"""
         # 実際のモデル一覧を取得
-        await self.get_available_models()
+        models = await self.get_available_models()
         
-        if not self._actual_models_cache:
+        if not models:
             return None
         
         # 設定ファイルの優先度順にモデルを探す
@@ -310,9 +337,9 @@ class OllamaProvider(LLMProvider):
                 return actual_model
         
         # 設定にないモデルの場合、利用可能な最初のモデルを使用
-        if self._actual_models_cache:
-            logger.warning(f"設定にないモデルを使用: {self._actual_models_cache[0]}")
-            return self._actual_models_cache[0]
+        if models:
+            logger.warning(f"設定にないモデルを使用: {models[0]}")
+            return models[0]
         
         return None
     

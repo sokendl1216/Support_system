@@ -1,0 +1,58 @@
+{
+  "embedding": {
+    "provider": "ollama",
+    "model": "nomic-embed-text",
+    "dimension": 768,
+    "batch_size": 32,
+    "timeout": 30
+  },
+  "vector_store": {
+    "type": "faiss",
+    "index_type": "IndexFlatIP",
+    "save_path": "ai/rag/vector_store/faiss_index",
+    "metadata_path": "ai/rag/vector_store/metadata.json"
+  },  "retrieval": {
+    "top_k": 5,
+    "similarity_threshold": 0.3,
+    "max_context_length": 4096,
+    "chunk_size": 512,
+    "chunk_overlap": 50,
+    "min_score": 0.1,
+    "diversity_threshold": 0.8
+  },
+  "knowledge_base": {
+    "data_directory": "ai/rag/knowledge_base",
+    "supported_formats": [".txt", ".md", ".json", ".py"],
+    "auto_refresh": true,
+    "refresh_interval_minutes": 60,
+    "chunking_strategy": "semantic_adaptive",
+    "metadata_extraction": true
+  },
+  "mode_optimization": {
+    "interactive": {
+      "top_k": 3,
+      "similarity_threshold": 0.2,
+      "prefer_recent": true,
+      "boost_user_context": 1.2,
+      "personalization_weight": 0.3,
+      "response_speed_priority": true,
+      "context_window_adaptive": true
+    },
+    "autonomous": {
+      "top_k": 8,
+      "similarity_threshold": 0.15,
+      "prefer_comprehensive": true,
+      "exploration_factor": 1.5,
+      "depth_search_enabled": true,
+      "cross_reference_boost": 1.3,
+      "multi_perspective_retrieval": true
+    },
+    "hybrid": {
+      "top_k": 5,
+      "similarity_threshold": 0.25,
+      "balanced_approach": true,
+      "adaptive_threshold": true,
+      "context_awareness": 0.7
+    }
+  }
+}
