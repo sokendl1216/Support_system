@@ -7,6 +7,9 @@ class BaseAgent(ABC):
     def run(self, input_data):
         pass
 
+# エイリアス
+Agent = BaseAgent
+
 class LLMClient(ABC):
     """LLM（大規模言語モデル）クライアントの抽象基底クラス"""
     @abstractmethod

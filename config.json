@@ -14,12 +14,58 @@
     "url": "sqlite:///app.db",
     "pool_size": 5,
     "echo": false
-  },
-  "ai": {
-    "ollama": {
-      "base_url": "http://localhost:11434",
-      "model": "llama2",
-      "timeout": 30
+  },  "ai": {
+    "llm_service": {
+      "health_check_interval": 300,
+      "default_provider": "ollama",
+      "providers": {        "ollama": {
+          "base_url": "http://localhost:11434",
+          "timeout": 30,
+          "models": {
+            "deepseek-coder": {
+              "enabled": true,
+              "priority": 1,
+              "patterns": ["deepseek-coder", "deepseek"]
+            },
+            "openhermes": {
+              "enabled": true,
+              "priority": 2,
+              "patterns": ["openhermes"]
+            },
+            "qwen": {
+              "enabled": true,
+              "priority": 3,
+              "patterns": ["qwen"]
+            },
+            "mistral": {
+              "enabled": true,
+              "priority": 4,
+              "patterns": ["mistral"]
+            },
+            "llama2:13b": {
+              "enabled": true,
+              "priority": 5,
+              "patterns": ["llama2:13b", "llama2-13b"]
+            },
+            "llama2": {
+              "enabled": true,
+              "priority": 6,
+              "patterns": ["llama2:7b", "llama2"]
+            },
+            "codellama": {
+              "enabled": true,
+              "priority": 7,
+              "patterns": ["codellama", "code-llama"]
+            }
+          }
+        }
+      }
+    },
+    "generation": {
+      "default_temperature": 0.7,
+      "default_max_tokens": 1000,
+      "default_top_p": 0.9,
+      "default_top_k": 40
     },
     "default_mode": "creative",
     "max_history": 1000
