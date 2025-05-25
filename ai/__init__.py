@@ -47,7 +47,32 @@ from .providers import OllamaProvider
 # 既存のクライアントとエージェント
 from .llm_oss_client import OSSLLMClient, OllamaLLMClient
 from .agent_base import Agent, LLMClient
-from .orchestrator import AgentOrchestrator
+
+# エージェントオーケストレーション
+from .agent_orchestrator import (
+    AgentOrchestrator,
+    ProgressMode,
+    TaskStatus,
+    AgentRole,
+    Task,
+    AgentContext,
+    OrchestratorState,
+    BaseAgent,
+    CoordinatorAgent,
+    AnalyzerAgent,
+    ExecutorAgent,
+    ReviewerAgent
+)
+
+from .orchestrator_utils import (
+    OrchestratorClient,
+    TaskBuilder,
+    TaskTemplates,
+    create_orchestrator_from_config,
+    quick_auto_execution,
+    quick_interactive_execution,
+    task
+)
 
 __all__ = [
     # LLMサービス抽象化レイヤー
@@ -80,11 +105,32 @@ __all__ = [
     
     # プロバイダー
     "OllamaProvider",
-    
-    # 既存クライアント・エージェント
+      # 既存クライアント・エージェント
     "OSSLLMClient",
     "OllamaLLMClient",
     "Agent",
-    "LLMClient", 
-    "AgentOrchestrator"
+    "LLMClient",
+    
+    # エージェントオーケストレーション
+    "AgentOrchestrator",
+    "ProgressMode",
+    "TaskStatus",
+    "AgentRole",
+    "Task",
+    "AgentContext",
+    "OrchestratorState",
+    "BaseAgent",
+    "CoordinatorAgent",
+    "AnalyzerAgent",
+    "ExecutorAgent",
+    "ReviewerAgent",
+    
+    # オーケストレーションユーティリティ
+    "OrchestratorClient",
+    "TaskBuilder",
+    "TaskTemplates",
+    "create_orchestrator_from_config",
+    "quick_auto_execution",
+    "quick_interactive_execution",
+    "task"
 ]

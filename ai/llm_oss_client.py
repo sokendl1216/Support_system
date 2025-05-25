@@ -10,13 +10,14 @@ logger = logging.getLogger(__name__)
 class OSSLLMClient(LLMClient):
     """OSS（無料）LLMモデル用のクライアント - 統合抽象化レイヤー経由"""
     
-    def __init__(self, model: str = None, **config):
+    def __init__(self, model: str = None, base_url: str = "http://localhost:11434", **config):
         """
         Args:
             model: 使用するモデル名（指定しない場合は自動選択）
-            **config: 生成設定のパラメータ
-        """
-        self.model = model
+            base_url: Ollama APIのベースURL
+            **config: 生成設定のパラメータ        """
+        self.model = model or "llama2"  # デフォルトモデル
+        self.base_url = base_url
         self.generation_config = GenerationConfig(
             temperature=config.get('temperature', 0.7),
             top_p=config.get('top_p', 0.9),
@@ -112,6 +113,57 @@ class OSSLLMClient(LLMClient):
             if hasattr(self.generation_config, key):
                 setattr(self.generation_config, key, value)
         logger.info(f"生成設定を更新しました: {config}")
+    
+    def _is_ollama_available(self) -> bool:
+        """Ollamaサーバーの利用可能性をチェック"""
+        try:
+            # 同期版での健全性チェック
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor() as executor:
+                    future = executor.submit(asyncio.run, self._async_health_check())
+                    return future.result(timeout=5)
+            else:
+                return asyncio.run(self._async_health_check())
+        except Exception:
+            return False
+    
+    def _is_model_available(self) -> bool:
+        """現在のモデルの利用可能性をチェック"""
+        try:
+            # 同期版での利用可能性チェック
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor() as executor:
+                    future = executor.submit(asyncio.run, self._async_model_check())
+                    return future.result(timeout=5)
+            else:
+                return asyncio.run(self._async_model_check())
+        except Exception:
+            return False
+    
+    async def _async_health_check(self) -> bool:
+        """Ollamaサーバーのヘルスチェック（非同期）"""
+        try:
+            provider = llm_service.get_provider("ollama")
+            if provider:
+                return await provider.is_healthy()
+            return False
+        except Exception:
+            return False
+    
+    async def _async_model_check(self) -> bool:
+        """モデルの利用可能性チェック（非同期）"""
+        try:
+            provider = llm_service.get_provider("ollama")
+            if provider and hasattr(provider, 'get_available_models'):
+                models = await provider.get_available_models()
+                return self.model in models
+            return False
+        except Exception:
+            return False
 
 # 後方互換性のためのエイリアス
 class OllamaLLMClient(OSSLLMClient):

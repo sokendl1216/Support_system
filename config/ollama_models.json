@@ -1,0 +1,67 @@
+{
+  "models": {
+    "deepseek-coder": {
+      "enabled": true,
+      "priority": 1,
+      "patterns": ["deepseek-coder", "deepseek"],
+      "description": "コード生成に特化した高性能OSSモデル",
+      "model_size": "6.7B",
+      "memory_requirement": "8GB",
+      "install_command": "ollama pull deepseek-coder",
+      "use_cases": ["code_generation", "code_review", "debugging"]
+    },
+    "llama2": {
+      "enabled": true,
+      "priority": 2,
+      "patterns": ["llama2", "llama"],
+      "description": "Metaの汎用LLMモデル",
+      "model_size": "7B",
+      "memory_requirement": "6GB",
+      "install_command": "ollama pull llama2",
+      "use_cases": ["text_generation", "qa", "summarization"]
+    },
+    "mistral": {
+      "enabled": true,
+      "priority": 3,
+      "patterns": ["mistral"],
+      "description": "高性能でコンパクトなフランス製LLM",
+      "model_size": "7B",
+      "memory_requirement": "6GB",
+      "install_command": "ollama pull mistral",
+      "use_cases": ["text_generation", "qa"]
+    },
+    "codellama": {
+      "enabled": true,
+      "priority": 4,
+      "patterns": ["codellama", "code-llama"],
+      "description": "Metaのコード生成特化モデル",
+      "model_size": "7B",
+      "memory_requirement": "8GB",
+      "install_command": "ollama pull codellama",
+      "use_cases": ["code_generation", "code_completion"]
+    },
+    "qwen2.5-coder": {
+      "enabled": false,
+      "priority": 5,
+      "patterns": ["qwen2.5-coder", "qwen-coder"],
+      "description": "Alibaba Cloudのコード生成モデル",
+      "model_size": "7B",
+      "memory_requirement": "8GB",
+      "install_command": "ollama pull qwen2.5-coder",
+      "use_cases": ["code_generation", "multilingual_coding"]
+    }
+  },
+  "server_config": {
+    "host": "localhost",
+    "port": 11434,
+    "timeout": 60,
+    "max_retries": 3,
+    "retry_delay": 2.0
+  },
+  "performance_config": {
+    "concurrent_requests": 2,
+    "memory_limit_gb": 16,
+    "cpu_threads": 4,
+    "gpu_enabled": false
+  }
+}

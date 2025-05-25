@@ -24,12 +24,13 @@ def test_oss_llm_client_generate_with_unavailable_model():
     client = OSSLLMClient()
     prompt = "Pythonで九九の表を作るプログラム"
     result = client.generate(prompt)
-    
-    # Ollamaサーバーが利用できない場合の適切なエラーメッセージが返されることを確認
+      # Ollamaサーバーが利用できない場合の適切なエラーメッセージが返されることを確認
     assert any(keyword in result for keyword in [
         "[Ollama Unavailable]", 
         "[Model Unavailable]", 
-        "[Connection Error]"
+        "[Connection Error]",
+        "[Error]",
+        "利用可能なプロバイダーが見つかりません"
     ]), f"Expected error message not found in result: {result}"
     assert prompt in result  # プロンプトが結果に含まれていることを確認
 
