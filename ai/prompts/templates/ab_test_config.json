@@ -1,0 +1,32 @@
+{
+  "enabled": true,
+  "sample_size_threshold": 100,
+  "confidence_level": 0.95,
+  "success_metrics": [
+    "response_quality",
+    "task_completion",
+    "user_satisfaction",
+    "response_time",
+    "context_relevance"
+  ],
+  "auto_promote_threshold": 0.05,
+  "min_test_duration_minutes": 30,
+  "max_test_duration_minutes": 1440,
+  "default_variant_weight": 0.5,
+  "statistical_tests": {
+    "chi_square": true,
+    "t_test": true,
+    "confidence_interval": true
+  },
+  "automated_promotion": {
+    "enabled": true,
+    "min_improvement_percentage": 5.0,
+    "min_sample_size": 50,
+    "required_confidence": 0.95
+  },
+  "rollback_conditions": {
+    "max_error_rate": 0.1,
+    "min_success_rate": 0.7,
+    "max_response_time": 5.0
+  }
+}

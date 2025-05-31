@@ -1,5 +1,5 @@
 """
-Ollamaプロバイダー実装 - OSSモデルを統一インターフェースで提供（セッション管理修正版）
+Ollamaプロバイダー実装 - OSSモデルを統一インターフェースで提供（セッション管理最適化版）
 
 このモジュールは、Ollama APIを通じてOSSモデルへのアクセスを提供します。
 DeepSeek, Llama, Mistral, CodeLlama等の無料モデルをサポートします。
@@ -31,12 +31,12 @@ class RetryConfig:
     timeout_multiplier: float = 1.5
 
 class OllamaProvider(LLMProvider):
-    """Ollama API統合プロバイダー（セッション管理修正版）"""
+    """Ollama API統合プロバイダー（セッション管理最適化版）"""
     
     def __init__(self, base_url: str = "http://localhost:11434", timeout: int = 60, model_config: Optional[Dict[str, Any]] = None):
         self.base_url = base_url.rstrip('/')
         self.timeout = timeout
-        self.model_config = model_config or {}
+        self.model_config = model_config or self._load_oss_model_config()
         self._models_cache: Optional[List[ModelInfo]] = None
         self._cache_time: Optional[float] = None
         self._cache_ttl = 300  # 5分間のキャッシュ
@@ -113,15 +113,6 @@ class OllamaProvider(LLMProvider):
             )
         }
     
-    async def _make_request(self, method: str, endpoint: str, **kwargs) -> aiohttp.ClientResponse:
-        """統一されたHTTPリクエストメソッド"""
-        url = f"{self.base_url}{endpoint}"
-        timeout = aiohttp.ClientTimeout(total=kwargs.pop('timeout', self.timeout))
-        
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.request(method, url, **kwargs) as response:
-                return response
-    
     def _load_oss_model_config(self) -> Dict[str, Any]:
         """OSS モデル設定ファイルの読み込み"""
         try:
@@ -130,11 +121,88 @@ class OllamaProvider(LLMProvider):
                 with open(config_path, 'r', encoding='utf-8') as f:
                     return json.load(f)
         except Exception as e:
-            print(f"OSS model config loading failed: {e}")
+            logger.debug(f"OSS model config loading failed: {e}")
         return {}
     
+    async def _make_request_with_retry(self, method: str, endpoint: str, session: Optional[aiohttp.ClientSession] = None, **kwargs) -> aiohttp.ClientResponse:
+        """リトライ機能付きHTTPリクエストメソッド（セッション管理最適化）"""
+        last_exception = None
+        delay = self.retry_config.initial_delay
+        close_session = session is None
+        
+        if session is None:
+            timeout = aiohttp.ClientTimeout(total=self.timeout)
+            session = aiohttp.ClientSession(timeout=timeout)
+        
+        try:
+            for attempt in range(self.retry_config.max_retries + 1):
+                try:
+                    url = f"{self.base_url}{endpoint}"
+                    timeout_multiplier = self.retry_config.timeout_multiplier ** attempt
+                    adjusted_timeout = min(self.timeout * timeout_multiplier, 300)  # 最大5分
+                    
+                    # セッションのタイムアウトを更新
+                    session._timeout = aiohttp.ClientTimeout(total=adjusted_timeout)
+                    
+                    logger.debug(f"HTTP Request attempt {attempt + 1}/{self.retry_config.max_retries + 1}: {method} {url}")
+                    
+                    async with session.request(method, url, **kwargs) as response:
+                        if response.status < 500:  # 4xx, 2xxは成功とみなす
+                            # レスポンスの内容を読み取って新しいレスポンスオブジェクトを作成
+                            content = await response.read()
+                            headers = response.headers
+                            status = response.status
+                            
+                            # 簡易的なレスポンスラッパー
+                            class ResponseWrapper:
+                                def __init__(self, content, headers, status):
+                                    self._content = content
+                                    self.headers = headers
+                                    self.status = status
+                                
+                                async def text(self):
+                                    return self._content.decode('utf-8')
+                                
+                                async def json(self):
+                                    return json.loads(await self.text())
+                                
+                                async def read(self):
+                                    return self._content
+                            
+                            return ResponseWrapper(content, headers, status)
+                        
+                        if attempt == self.retry_config.max_retries:
+                            response.raise_for_status()
+                        
+                        logger.warning(f"Server error {response.status}, retrying in {delay}s...")
+                        
+                except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                    last_exception = e
+                    if attempt == self.retry_config.max_retries:
+                        logger.error(f"Request failed after {self.retry_config.max_retries + 1} attempts: {e}")
+                        raise
+                    
+                    logger.warning(f"Request failed (attempt {attempt + 1}), retrying in {delay}s: {e}")
+                
+                # 指数バックオフでリトライ待機
+                if attempt < self.retry_config.max_retries:
+                    await asyncio.sleep(delay)
+                    delay = min(delay * self.retry_config.backoff_multiplier, self.retry_config.max_delay)
+            
+            # 最後の例外を再発生
+            if last_exception:
+                raise last_exception
+                
+        finally:
+            if close_session:
+                await session.close()
+
+    async def _make_request(self, method: str, endpoint: str, **kwargs) -> aiohttp.ClientResponse:
+        """統一されたHTTPリクエストメソッド（リトライ機能付き）"""
+        return await self._make_request_with_retry(method, endpoint, **kwargs)
+    
     async def generate(self, request: GenerationRequest) -> GenerationResponse:
-        """テキスト生成"""
+        """テキスト生成（リトライ機能付きセッション管理）"""
         start_time = time.time()
         
         try:
@@ -165,31 +233,35 @@ class OllamaProvider(LLMProvider):
                 "options": self._build_options(request.config)
             }
             
-            # API呼び出し
-            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=self.timeout)) as session:
-                async with session.post(f"{self.base_url}/api/generate", json=data) as response:
-                    
-                    if response.status != 200:
-                        error_text = await response.text()
-                        return GenerationResponse(
-                            text="",
-                            model_name=model_name,
-                            generation_time=time.time() - start_time,
-                            token_count=0,
-                            finish_reason="error",
-                            error=f"API エラー: {response.status} - {error_text}"
-                        )
-                    
-                    result = await response.json()
-                    text = result.get("response", "")
-                    
+            # リトライ機能付きAPI呼び出し
+            async with aiohttp.ClientSession() as session:
+                response = await self._make_request_with_retry(
+                    method="POST",
+                    endpoint="/api/generate",                    session=session,
+                    json=data
+                )
+                
+                if response.status != 200:
+                    error_text = await response.text()
                     return GenerationResponse(
-                        text=text,
+                        text="",
                         model_name=model_name,
                         generation_time=time.time() - start_time,
-                        token_count=self._estimate_token_count(text),
-                        finish_reason="stop"
+                        token_count=0,
+                        finish_reason="error",
+                        error=f"API エラー: {response.status} - {error_text}"
                     )
+                
+                result = await response.json()
+                text = result.get("response", "")
+                
+                return GenerationResponse(
+                    text=text,
+                    model_name=model_name,
+                    generation_time=time.time() - start_time,
+                    token_count=self._estimate_token_count(text),
+                    finish_reason="stop"
+                )
                     
         except Exception as e:
             logger.error(f"テキスト生成エラー: {e}")
@@ -203,7 +275,7 @@ class OllamaProvider(LLMProvider):
             )
     
     async def generate_stream(self, request: GenerationRequest) -> AsyncGenerator[str, None]:
-        """ストリーミングテキスト生成"""
+        """ストリーミングテキスト生成（リトライ機能付きセッション管理）"""
         try:
             # モデル名の決定
             if request.model_name:
@@ -225,25 +297,31 @@ class OllamaProvider(LLMProvider):
                 "options": self._build_options(request.config)
             }
             
-            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=self.timeout)) as session:
+            # ストリーミング用の直接リクエスト（ResponseWrapperを回避）
+            timeout = aiohttp.ClientTimeout(total=self.timeout)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
                 async with session.post(f"{self.base_url}/api/generate", json=data) as response:
                     
                     if response.status != 200:
                         yield f"[ERROR] API エラー: {response.status}"
                         return
                     
+                    # ストリーミングレスポンスの処理
                     async for line in response.content:
                         if line:
                             try:
-                                data = json.loads(line.decode('utf-8'))
-                                if "response" in data:
-                                    yield data["response"]
-                                if data.get("done", False):
-                                    break
+                                line_str = line.decode('utf-8').strip()
+                                if line_str:
+                                    response_data = json.loads(line_str)
+                                    if "response" in response_data:
+                                        yield response_data["response"]
+                                    if response_data.get("done", False):
+                                        break
                             except json.JSONDecodeError:
                                 continue
                                 
         except Exception as e:
+            logger.error(f"ストリーミング生成エラー: {e}")
             yield f"[ERROR] {str(e)}"
     
     def list_models(self) -> List[ModelInfo]:
@@ -255,14 +333,14 @@ class OllamaProvider(LLMProvider):
         return self._model_definitions.get(model_name)
     
     async def is_healthy(self) -> bool:
-        """ヘルスチェック"""
+        """ヘルスチェック（リトライ機能付き）"""
         try:
-            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=5)) as session:
-                async with session.get(f"{self.base_url}/api/tags") as response:
-                    return response.status == 200
-        except:
+            response = await self._make_request("GET", "/api/tags")
+            return response.status == 200
+        except Exception as e:
+            logger.error(f"ヘルスチェックエラー: {e}")
             return False
-    
+
     async def get_available_models(self) -> List[str]:
         """実際に利用可能なモデル名の取得（キャッシュ機能付き）"""
         # キャッシュの確認
@@ -272,24 +350,23 @@ class OllamaProvider(LLMProvider):
             return self._actual_models_cache
         
         try:
-            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=5)) as session:
-                async with session.get(f"{self.base_url}/api/tags") as response:
-                    
-                    if response.status != 200:
-                        print(f"モデル一覧取得失敗: ステータス {response.status}")
-                        return []
-                    
-                    result = await response.json()
-                    models = [model["name"] for model in result.get("models", [])]
-                    
-                    # キャッシュに保存
-                    self._actual_models_cache = models
-                    self._cache_time = time.time()
-                    
-                    return models
+            response = await self._make_request("GET", "/api/tags")
+            
+            if response.status != 200:
+                logger.warning(f"モデル一覧取得失敗: ステータス {response.status}")
+                return []
+            
+            result = await response.json()
+            models = [model["name"] for model in result.get("models", [])]
+            
+            # キャッシュに保存
+            self._actual_models_cache = models
+            self._cache_time = time.time()
+            
+            return models
                     
         except Exception as e:
-            print(f"モデル一覧取得エラー: {e}")
+            logger.error(f"モデル一覧取得エラー: {e}")
             return []
     
     async def _find_actual_model_name(self, config_name: str) -> Optional[str]:
@@ -299,14 +376,16 @@ class OllamaProvider(LLMProvider):
         
         if not models:
             return None
-        
-        # 設定から該当モデルのパターンを取得
+          # 設定から該当モデルのパターンを取得
         model_info = self.model_config.get(config_name, {})
         patterns = model_info.get("patterns", [config_name])
         
-        # パターンマッチング
+        # パターンマッチング（生成可能なモデルのみ）
         for pattern in patterns:
             for actual_model in models:
+                # 埋め込み専用モデルは除外
+                if "embed" in actual_model.lower():
+                    continue
                 if pattern.lower() in actual_model.lower():
                     return actual_model
         
@@ -320,9 +399,13 @@ class OllamaProvider(LLMProvider):
         if not models:
             return None
         
+        # 生成可能なモデルのみをフィルタリング
+        generation_models = [m for m in models if "embed" not in m.lower()]
+        
         # 設定ファイルの優先度順にモデルを探す
+        models_config = self.model_config.get("models", self.model_config)
         enabled_models = []
-        for config_name, config in self.model_config.items():
+        for config_name, config in models_config.items():
             if config.get("enabled", True):
                 enabled_models.append((config_name, config.get("priority", 999)))
         
@@ -332,14 +415,23 @@ class OllamaProvider(LLMProvider):
         # 優先度順に実際のモデルを探す
         for config_name, _ in enabled_models:
             actual_model = await self._find_actual_model_name(config_name)
-            if actual_model:
+            if actual_model and actual_model in generation_models:
                 logger.info(f"選択されたモデル: {config_name} -> {actual_model}")
                 return actual_model
         
-        # 設定にないモデルの場合、利用可能な最初のモデルを使用
-        if models:
-            logger.warning(f"設定にないモデルを使用: {models[0]}")
-            return models[0]
+        # 設定にないモデルの場合、生成可能な最初のモデルを使用
+        if generation_models:
+            # deepseek-coder, codellama, mistral, llama2 の順に優先
+            preferred_order = ["deepseek-coder", "codellama", "mistral", "llama2"]
+            for preferred in preferred_order:
+                for model in generation_models:
+                    if preferred in model.lower():
+                        logger.info(f"推奨モデルを使用: {model}")
+                        return model
+            
+            # それでも見つからない場合は最初の生成可能モデルを使用
+            logger.warning(f"設定にないモデルを使用: {generation_models[0]}")
+            return generation_models[0]
         
         return None
     

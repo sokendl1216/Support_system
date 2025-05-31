@@ -1,0 +1,25 @@
+{
+  "python_script": {
+    "name": "Python スクリプト",
+    "description": "汎用Pythonスクリプトテンプレート",
+    "template": "#!/usr/bin/env python3\n\"\"\"\n{description}\n\"\"\"\n\nimport sys\nimport logging\nfrom typing import Any, Dict, List, Optional\n\n# ログ設定\nlogging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')\nlogger = logging.getLogger(__name__)\n\ndef main():\n    \"\"\"\n    メイン処理\n    \"\"\"\n    try:\n        # ここにメインロジックを実装\n        print(\"Hello, World!\")\n        \n    except Exception as e:\n        logger.error(f\"エラーが発生しました: {e}\")\n        sys.exit(1)\n\nif __name__ == \"__main__\":\n    main()\n",
+    "variables": ["description"],
+    "files": ["main.py"]
+  },
+  "python_cli": {
+    "name": "Python CLI アプリケーション",
+    "description": "コマンドラインインターフェースアプリケーション",
+    "template": "#!/usr/bin/env python3\n\"\"\"\n{description}\nコマンドライン引数処理機能付きCLIアプリケーション\n\"\"\"\n\nimport argparse\nimport sys\nimport logging\nfrom typing import Any, Dict, List, Optional\nfrom pathlib import Path\n\n# ログ設定\nlogging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')\nlogger = logging.getLogger(__name__)\n\ndef parse_arguments():\n    \"\"\"\n    コマンドライン引数を解析\n    \"\"\"\n    parser = argparse.ArgumentParser(description='{description}')\n    parser.add_argument('--input', '-i', type=str, help='入力ファイル')\n    parser.add_argument('--output', '-o', type=str, help='出力ファイル')\n    parser.add_argument('--verbose', '-v', action='store_true', help='詳細出力')\n    return parser.parse_args()\n\ndef main():\n    \"\"\"\n    メイン処理\n    \"\"\"\n    args = parse_arguments()\n    \n    if args.verbose:\n        logging.getLogger().setLevel(logging.DEBUG)\n    \n    try:\n        logger.info(\"処理開始\")\n        \n        # ここにメインロジックを実装\n        if args.input:\n            logger.info(f\"入力ファイル: {args.input}\")\n        \n        if args.output:\n            logger.info(f\"出力ファイル: {args.output}\")\n        \n        logger.info(\"処理完了\")\n        \n    except Exception as e:\n        logger.error(f\"エラーが発生しました: {e}\")\n        sys.exit(1)\n\nif __name__ == \"__main__\":\n    main()\n",
+    "variables": ["description"],
+    "files": ["cli.py", "requirements.txt"],
+    "dependencies": ["argparse"]
+  },
+  "python_web_app": {
+    "name": "Python Webアプリケーション",
+    "description": "Flask を使用したWebアプリケーション",
+    "template": "\"\"\"\n{description}\nFlask を使用したWebアプリケーション\n\"\"\"\n\nfrom flask import Flask, render_template, request, jsonify\nimport logging\nfrom typing import Any, Dict, List, Optional\n\n# ログ設定\nlogging.basicConfig(level=logging.INFO)\nlogger = logging.getLogger(__name__)\n\napp = Flask(__name__)\napp.config['SECRET_KEY'] = 'your-secret-key-here'\n\n@app.route('/')\ndef index():\n    \"\"\"\n    トップページ\n    \"\"\"\n    return render_template('index.html')\n\n@app.route('/api/data', methods=['GET'])\ndef get_data():\n    \"\"\"\n    API エンドポイント - データ取得\n    \"\"\"\n    try:\n        # ここにデータ取得ロジックを実装\n        data = {\n            'message': 'Hello from API!',\n            'status': 'success'\n        }\n        return jsonify(data)\n    except Exception as e:\n        logger.error(f\"API エラー: {e}\")\n        return jsonify({'error': str(e)}), 500\n\n@app.route('/api/data', methods=['POST'])\ndef post_data():\n    \"\"\"\n    API エンドポイント - データ送信\n    \"\"\"\n    try:\n        data = request.get_json()\n        # ここにデータ処理ロジックを実装\n        \n        return jsonify({\n            'message': 'Data received successfully',\n            'received_data': data\n        })\n    except Exception as e:\n        logger.error(f\"API エラー: {e}\")\n        return jsonify({'error': str(e)}), 500\n\nif __name__ == '__main__':\n    app.run(debug=True, host='0.0.0.0', port=5000)\n",
+    "variables": ["description"],
+    "files": ["app.py", "requirements.txt", "templates/index.html"],
+    "dependencies": ["flask"]
+  }
+}

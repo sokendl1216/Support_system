@@ -1,0 +1,68 @@
+{
+  "interactive_general": [
+    {
+      "variant_id": "interactive_general_variant_1",
+      "template_id": "interactive_general",
+      "template": "こんにちは！知識豊富なアシスタントとしてお手伝いします。\n\nご質問: {query}\n\n関連情報:\n{context}\n\n上記の情報をもとに、できるだけ分かりやすくお答えします。ご不明な点があれば、遠慮なくお聞きください！",
+      "weight": 0.3,
+      "active": true,
+      "test_metrics": {
+        "response_quality": 0.87,
+        "user_satisfaction": 0.89,
+        "friendliness": 0.92
+      }
+    },
+    {
+      "variant_id": "interactive_general_variant_2",
+      "template_id": "interactive_general",
+      "template": "ご質問にお答えします。\n\n質問内容: {query}\n\n参考データ:\n{context}\n\n上記の情報に基づいて正確にお答えします。追加の質問がございましたらお申し付けください。",
+      "weight": 0.2,
+      "active": true,
+      "test_metrics": {
+        "response_quality": 0.83,
+        "user_satisfaction": 0.81,
+        "formality": 0.88
+      }
+    }
+  ],
+  "autonomous_analyzer": [
+    {
+      "variant_id": "autonomous_analyzer_variant_1",
+      "template_id": "autonomous_analyzer",
+      "template": "高度分析モードで対応します。\n\n分析テーマ: {query}\n\n情報源:\n{context}\n\n以下のステップで徹底的に分析します：\n• データ収集と検証\n• 多面的な視点での分析\n• パターンと傾向の特定\n• 結論の導出と検証\n• 実用的な推奨事項の提示\n\n全工程を完了し、詳細な分析結果をお届けします。",
+      "weight": 0.4,
+      "active": true,
+      "test_metrics": {
+        "response_quality": 0.90,
+        "completeness": 0.93,
+        "systematicity": 0.91
+      }
+    }
+  ],
+  "hybrid_adaptive": [
+    {
+      "variant_id": "hybrid_adaptive_variant_1",
+      "template_id": "hybrid_adaptive",
+      "template": "スマート・アシスタントモードで最適化されたサポートを提供します。\n\nリクエスト: {query}\n\nナレッジベース:\n{context}\n\n状況を分析し、最も効果的なアプローチを自動選択します：\n→ 対話が必要な場合：段階的なサポート\n→ 包括的な回答が適切な場合：詳細な分析結果\n\n最適化されたアシスタンスを提供します。",
+      "weight": 0.35,
+      "active": true,
+      "test_metrics": {
+        "response_quality": 0.86,
+        "adaptability": 0.90,
+        "efficiency": 0.88
+      }
+    },
+    {
+      "variant_id": "hybrid_adaptive_variant_2",
+      "template_id": "hybrid_adaptive",
+      "template": "フレキシブル・サポートモードで対応します。\n\nご依頼: {query}\n\n知識リソース:\n{context}\n\nケースに応じて最適な方法を選択します。簡潔な回答が適切な場合は要点をまとめ、詳細な説明が必要な場合は包括的に対応します。ニーズに合わせて柔軟にサポートいたします。",
+      "weight": 0.25,
+      "active": true,
+      "test_metrics": {
+        "response_quality": 0.82,
+        "adaptability": 0.85,
+        "user_satisfaction": 0.87
+      }
+    }
+  ]
+}
