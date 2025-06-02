@@ -12,6 +12,8 @@ from pathlib import Path
 from .embedding_service import EmbeddingService
 from .vector_store import VectorStore
 from .knowledge_base import KnowledgeBaseManager, DocumentChunk
+from ..cache_manager import get_cache_manager, AICacheManager
+from ..process_monitor import get_process_monitor, AIProcessMonitor, ProcessStatus
 
 logger = logging.getLogger(__name__)
 
@@ -49,16 +51,21 @@ class RAGSystem:
     統合RAGシステム
     知識ベース検索・適用システム
     """
-    
     def __init__(self, config: Dict[str, Any]):
         self.config = config
         self.retrieval_config = config.get("retrieval", {})
         self.mode_config = config.get("mode_optimization", {})
+        self.cache_config = config.get("cache", {})
+        self.monitor_config = config.get("monitor", {})
         
         # コンポーネント初期化
         self.embedding_service = EmbeddingService(config)
         self.vector_store = VectorStore(config)
         self.knowledge_base = KnowledgeBaseManager(config)
+        
+        # キャッシュシステムとプロセス監視（後で初期化）
+        self.cache_manager = None
+        self.process_monitor = None
         
         # 状態管理
         self.is_initialized = False
@@ -68,7 +75,7 @@ class RAGSystem:
             "last_update": 0,
             "needs_reindex": False
         }
-    
+        
     async def initialize(self) -> bool:
         """
         RAGシステム全体の初期化
@@ -91,6 +98,40 @@ class RAGSystem:
             if not knowledge_base_ok:
                 logger.error("Failed to initialize knowledge base")
                 return False
+                
+            # キャッシュシステムの初期化
+            try:
+                cache_enabled = self.cache_config.get("enabled", True)
+                cache_ttl = self.cache_config.get("ttl_seconds", 3600 * 24)  # デフォルト24時間
+                cache_max_size = self.cache_config.get("max_size_mb", 500)  # デフォルト500MB
+                cache_dir = self.cache_config.get("cache_dir")
+                
+                self.cache_manager = await get_cache_manager(
+                    cache_dir=cache_dir,
+                    ttl_seconds=cache_ttl,
+                    max_cache_size_mb=cache_max_size,
+                    enable_cache=cache_enabled
+                )
+                logger.info(f"RAG cache system initialized: enabled={cache_enabled}")
+            except Exception as cache_error:
+                logger.warning(f"Failed to initialize cache system: {cache_error}, proceeding without cache")
+                
+            # プロセス監視システムの初期化
+            try:
+                monitor_enabled = self.monitor_config.get("enabled", True)
+                if monitor_enabled:
+                    cleanup_interval = self.monitor_config.get("cleanup_interval_seconds", 300)
+                    process_timeout = self.monitor_config.get("process_timeout_seconds", 600)
+                    max_history = self.monitor_config.get("max_history_count", 1000)
+                    
+                    self.process_monitor = await get_process_monitor(
+                        cleanup_interval_seconds=cleanup_interval,
+                        process_timeout_seconds=process_timeout,
+                        max_history_count=max_history
+                    )
+                    logger.info("RAG process monitor initialized")
+            except Exception as monitor_error:
+                logger.warning(f"Failed to initialize process monitor: {monitor_error}, proceeding without monitoring")
             
             # インデックス状態をチェック
             await self._check_index_status()
@@ -98,8 +139,7 @@ class RAGSystem:
             # 必要に応じて再インデックス
             if self.index_status["needs_reindex"]:
                 logger.info("Reindexing required, starting reindex process...")
-                await self.reindex_knowledge_base()
-            
+                await self.reindex_knowledge_base()            
             self.is_initialized = True
             logger.info("RAG system initialized successfully")
             return True
@@ -107,7 +147,7 @@ class RAGSystem:
         except Exception as e:
             logger.error(f"Failed to initialize RAG system: {e}")
             return False
-    
+            
     async def _check_index_status(self) -> None:
         """
         インデックス状態をチェック
@@ -128,11 +168,10 @@ class RAGSystem:
             })
             
             logger.info(f"Index status: {total_chunks} chunks, {indexed_vectors} vectors indexed")
-            
         except Exception as e:
             logger.error(f"Error checking index status: {e}")
             self.index_status["needs_reindex"] = True
-    
+            
     async def search(
         self,
         query: str,
@@ -143,6 +182,8 @@ class RAGSystem:
         """
         知識ベースを検索
         """
+        process_id = None
+        
         if not self.is_initialized:
             logger.error("RAG system not initialized")
             return []
@@ -151,6 +192,53 @@ class RAGSystem:
             return []
         
         try:
+            # プロセス監視開始 (利用可能な場合)
+            if self.process_monitor:
+                process_id = await self.process_monitor.register_process(
+                    process_type="rag_search",
+                    metadata={"query": query, "mode": mode, "top_k": top_k}
+                )
+                await self.process_monitor.start_process(process_id)
+            
+            # キャッシュチェック (利用可能な場合)
+            if self.cache_manager:
+                cache_key = {
+                    "operation": "rag_search",
+                    "query": query,
+                    "mode": mode,
+                    "top_k": top_k,
+                    "similarity_threshold": similarity_threshold
+                }
+                
+                cache_hit, cached_results = await self.cache_manager.get_cache(cache_key)
+                if cache_hit and cached_results:
+                    logger.debug(f"Cache hit for RAG search: {query[:30]}...")
+                    
+                    # キャッシュから結果を再構築
+                    results = []
+                    for item in cached_results:
+                        chunk = DocumentChunk(
+                            chunk_id=item["chunk_id"],
+                            content=item["content"],
+                            metadata=item["metadata"]
+                        )
+                        results.append(RAGSearchResult(
+                            chunk=chunk,
+                            similarity=item["similarity"],
+                            distance=item["distance"],
+                            rank=item["rank"],
+                            vector_id=item["vector_id"]
+                        ))
+                    
+                    # プロセス完了報告
+                    if self.process_monitor and process_id:
+                        await self.process_monitor.complete_process(
+                            process_id,
+                            metadata_update={"cache_hit": True, "results_count": len(results)}
+                        )
+                    
+                    return results
+            
             # モード別設定を適用
             search_config = self._get_mode_config(mode)
             if top_k is None:
@@ -161,12 +249,31 @@ class RAGSystem:
                     self.retrieval_config.get("similarity_threshold", 0.7)
                 )
             
+            # 進捗更新
+            if self.process_monitor and process_id:
+                await self.process_monitor.update_progress(
+                    process_id, 0.2, 
+                    {"stage": "embedding_query"}
+                )
+                
             # クエリを埋め込み
             query_embedding = await self.embedding_service.embed_query(query)
             if not query_embedding:
                 logger.error("Failed to generate query embedding")
+                if self.process_monitor and process_id:
+                    await self.process_monitor.fail_process(
+                        process_id,
+                        error_message="Failed to generate query embedding"
+                    )
                 return []
             
+            # 進捗更新
+            if self.process_monitor and process_id:
+                await self.process_monitor.update_progress(
+                    process_id, 0.4, 
+                    {"stage": "vector_search"}
+                )
+                
             # ベクトル検索を実行
             vector_results = await self.vector_store.search(
                 query_vector=query_embedding,
@@ -177,9 +284,16 @@ class RAGSystem:
             if not vector_results:
                 logger.info("No relevant documents found")
                 return []
-            
-            # 結果をRAGSearchResultに変換
+              # 結果をRAGSearchResultに変換
             search_results = []
+            
+            # 進捗更新
+            if self.process_monitor and process_id:
+                await self.process_monitor.update_progress(
+                    process_id, 0.6, 
+                    {"stage": "process_results", "result_count": len(vector_results)}
+                )
+                
             for result in vector_results:
                 # チャンクを取得
                 chunk = await self.knowledge_base.get_chunk_by_id(str(result["id"]))
@@ -187,20 +301,74 @@ class RAGSystem:
                     rag_result = RAGSearchResult(
                         chunk=chunk,
                         similarity=result["similarity"],
-                        distance=result["distance"],                        rank=result["rank"],
+                        distance=result["distance"],
+                        rank=result["rank"],
                         vector_id=result["id"]
                     )
                     search_results.append(rag_result)
             
             logger.info(f"Found {len(search_results)} relevant documents for query")
             
+            # 進捗更新
+            if self.process_monitor and process_id:
+                await self.process_monitor.update_progress(
+                    process_id, 0.8, 
+                    {"stage": "applying_optimization", "pre_opt_count": len(search_results)}
+                )
+                
             # モード別最適化を適用
             optimized_results = await self._apply_mode_optimization(search_results, mode, query)
+            
+            # キャッシュに結果を保存（利用可能な場合）
+            if self.cache_manager:
+                # 辞書形式に変換
+                cacheable_results = []
+                for result in optimized_results:
+                    cacheable_results.append({
+                        "chunk_id": result.chunk.chunk_id,
+                        "content": result.chunk.content,
+                        "metadata": result.chunk.metadata,
+                        "similarity": result.similarity,
+                        "distance": result.distance,
+                        "rank": result.rank,
+                        "vector_id": result.vector_id
+                    })
+                
+                # キャッシュキー
+                cache_key = {
+                    "operation": "rag_search",
+                    "query": query,
+                    "mode": mode,
+                    "top_k": top_k,
+                    "similarity_threshold": similarity_threshold
+                }
+                
+                # 非同期でキャッシュに保存
+                asyncio.create_task(self.cache_manager.set_cache(cache_key, cacheable_results))
+            
+            # プロセス完了報告
+            if self.process_monitor and process_id:
+                await self.process_monitor.complete_process(
+                    process_id,
+                    metadata_update={
+                        "results_count": len(optimized_results),
+                        "optimization_applied": True,
+                        "mode": mode
+                    }
+                )
             
             return optimized_results
             
         except Exception as e:
             logger.error(f"Error during search: {e}")
+            
+            # プロセスエラー報告
+            if self.process_monitor and process_id:
+                await self.process_monitor.fail_process(
+                    process_id,
+                    error_message=f"Search failed: {str(e)}"
+                )
+                
             return []
     
     def _get_mode_config(self, mode: str) -> Dict[str, Any]:
@@ -710,18 +878,16 @@ class RAGSystem:
                 "status": "completed",
                 "total_chunks": len(chunks),
                 "indexed_chunks": total_indexed,
-                "errors": errors,
-                "elapsed_time": round(elapsed_time, 2),
+                "errors": errors,                "elapsed_time": round(elapsed_time, 2),
                 "refresh_result": refresh_result
             }
-            
             logger.info(f"Reindexing completed: {result}")
             return result
             
         except Exception as e:
             logger.error(f"Error during reindexing: {e}")
             return {"status": "error", "error": str(e)}
-    
+            
     async def get_stats(self) -> Dict[str, Any]:
         """
         RAGシステムの統計情報を取得
@@ -732,7 +898,7 @@ class RAGSystem:
             vector_stats = await self.vector_store.get_stats()
             embedding_health = await self.embedding_service.health_check()
             
-            return {
+            stats = {
                 "system_status": "initialized" if self.is_initialized else "not_initialized",
                 "knowledge_base": kb_stats,
                 "vector_store": vector_stats,
@@ -743,6 +909,27 @@ class RAGSystem:
                     "mode_optimization": self.mode_config
                 }
             }
+            
+            # キャッシュ統計を追加
+            if self.cache_manager:
+                cache_stats = await self.cache_manager.get_stats()
+                stats["cache"] = cache_stats
+            
+            # プロセス監視統計を追加
+            if self.process_monitor:
+                monitor_stats = await self.process_monitor.get_stats()
+                # アクティブなRAG検索プロセスを追加
+                active_rag_processes = await self.process_monitor.get_active_processes()
+                rag_processes = [p for p in active_rag_processes 
+                               if p.get("process_type") == "rag_search"]
+                
+                stats["process_monitor"] = {
+                    **monitor_stats,
+                    "active_rag_searches": len(rag_processes)
+                }
+                
+            return stats
+            
         except Exception as e:
             logger.error(f"Error getting RAG stats: {e}")
             return {"error": str(e)}

@@ -7,10 +7,13 @@ import asyncio
 import logging
 from typing import List, Dict, Any, Optional, AsyncGenerator
 from pathlib import Path
+import time
 
 from .rag_system import RAGSystem, RAGSearchResult
 from ..llm_service import LLMServiceManager, GenerationRequest, GenerationResponse
 from ..providers.ollama_provider import OllamaProvider
+from ..cache_manager import get_cache_manager
+from ..process_monitor import get_process_monitor, ProcessStatus
 
 logger = logging.getLogger(__name__)
 
@@ -122,15 +125,72 @@ class RAGAIService:
         """
         RAGを使用した生成
         """
+        process_id = None
+        start_time = time.time()
+        
         if not self.is_initialized:
             raise RuntimeError("RAG AI Service not initialized")
-        
+            
+        # プロセス監視開始
         try:
-            # RAGコンテキストを生成
+            process_monitor = await get_process_monitor()
+            process_id = await process_monitor.register_process(
+                process_type="rag_generation",
+                metadata={
+                    "query": query,
+                    "mode": mode,
+                    "model": model,
+                    "rag_enabled": self.enable_rag
+                }
+            )
+            await process_monitor.start_process(process_id)
+        except Exception as e:
+            logger.warning(f"プロセス監視の開始に失敗: {e}")
+        
+        # キャッシュチェック
+        try:
+            cache_manager = await get_cache_manager()
+            cache_key = {
+                "operation": "rag_generation",
+                "query": query,
+                "mode": mode,
+                "model": model,
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+                "context_length": context_length
+            }
+            
+            cache_hit, cached_result = await cache_manager.get_cache(cache_key)
+            if cache_hit and cached_result:
+                logger.info(f"キャッシュヒット: {query[:30]}...")
+                
+                # プロセス完了報告
+                if process_id:
+                    await process_monitor.complete_process(
+                        process_id,
+                        metadata_update={
+                            "cache_hit": True,
+                            "duration_ms": int((time.time() - start_time) * 1000)
+                        }
+                    )
+                
+                cached_result["from_cache"] = True
+                return cached_result
+        except Exception as e:
+            logger.warning(f"キャッシュチェックに失敗: {e}")
+        
+        try:            # RAGコンテキストを生成
             rag_context = None
             rag_sources = []
             
             if self.enable_rag:
+                # プロセス進捗更新
+                if process_id:
+                    await process_monitor.update_progress(
+                        process_id, 0.2, 
+                        {"stage": "context_generation"}
+                    )
+                
                 context_result = await self.rag_system.generate_context(
                     query=query,
                     mode=mode,
@@ -141,8 +201,22 @@ class RAGAIService:
                     rag_context = context_result["context"]
                     rag_sources = context_result.get("sources", [])
                     logger.info(f"Generated RAG context with {len(rag_sources)} sources")
+                    
+                    # プロセス進捗更新
+                    if process_id:
+                        await process_monitor.update_progress(
+                            process_id, 0.4, 
+                            {"stage": "context_generated", "sources_count": len(rag_sources)}
+                        )
                 else:
                     logger.info("No relevant context found in knowledge base")
+                    
+                    # プロセス進捗更新
+                    if process_id:
+                        await process_monitor.update_progress(
+                            process_id, 0.4, 
+                            {"stage": "no_context_found"}
+                        )
             
             # プロンプトを構築
             if rag_context:
@@ -158,9 +232,16 @@ class RAGAIService:
                 generation_type = "llm_only"
                 if self.enable_rag:
                     logger.warning("No RAG context available, falling back to LLM only")
-            
-            # LLM生成を実行
+              # LLM生成を実行
             llm_response = None
+            
+            # プロセス進捗更新
+            if process_id:
+                await process_monitor.update_progress(
+                    process_id, 0.6, 
+                    {"stage": "llm_generation", "generation_type": generation_type}
+                )
+                
             if self.llm_service:
                 request = GenerationRequest(
                     prompt=prompt,
@@ -170,8 +251,18 @@ class RAGAIService:
                 )
                 
                 llm_response = await self.llm_service.generate(request)
-            
-            # 結果を構築
+                
+                # プロセス進捗更新
+                if process_id:
+                    await process_monitor.update_progress(
+                        process_id, 0.8, 
+                        {
+                            "stage": "llm_response_received", 
+                            "success": llm_response is not None,
+                            "model": llm_response.model if llm_response else None
+                        }
+                    )
+              # 結果を構築
             result = {
                 "query": query,
                 "response": llm_response.content if llm_response else "LLMサービスが利用できません",
@@ -180,7 +271,9 @@ class RAGAIService:
                 "sources": rag_sources,
                 "context_length": len(rag_context) if rag_context else 0,
                 "model_used": llm_response.model if llm_response else None,
-                "tokens_used": llm_response.usage.get("total_tokens") if llm_response and llm_response.usage else None
+                "tokens_used": llm_response.usage.get("total_tokens") if llm_response and llm_response.usage else None,
+                "generated_at": time.time(),
+                "process_time_ms": int((time.time() - start_time) * 1000)
             }
             
             # メタデータを追加
@@ -196,18 +289,70 @@ class RAGAIService:
                     "error": "LLM generation failed"
                 })
             
-            return result
+            # キャッシュに結果を保存
+            try:
+                if result.get("success", False):
+                    cache_manager = await get_cache_manager()
+                    cache_key = {
+                        "operation": "rag_generation",
+                        "query": query,
+                        "mode": mode,
+                        "model": model,
+                        "max_tokens": max_tokens,
+                        "temperature": temperature,
+                        "context_length": context_length
+                    }
+                    # 非同期でキャッシュに保存
+                    asyncio.create_task(cache_manager.set_cache(cache_key, result))
+            except Exception as e:
+                logger.warning(f"結果のキャッシュに失敗: {e}")
             
+            # プロセス完了を報告
+            if process_id:
+                success = result.get("success", False)
+                if success:
+                    await process_monitor.complete_process(
+                        process_id,
+                        metadata_update={
+                            "duration_ms": int((time.time() - start_time) * 1000),
+                            "generation_type": generation_type,
+                            "token_count": result.get("tokens_used"),
+                            "source_count": len(rag_sources) if rag_sources else 0
+                        }
+                    )
+                else:
+                    await process_monitor.fail_process(
+                        process_id,                        error_message=result.get("error", "Unknown generation failure"),
+                        metadata_update={
+                            "duration_ms": int((time.time() - start_time) * 1000)
+                        }
+                    )
+            return result
         except Exception as e:
             logger.error(f"Error in RAG generation: {e}")
+            
+            # エラーを報告
+            if process_id:
+                try:
+                    await process_monitor.fail_process(
+                        process_id,
+                        error_message=str(e),
+                        metadata_update={
+                            "duration_ms": int((time.time() - start_time) * 1000)
+                        }
+                    )
+                except Exception as monitor_error:
+                    logger.error(f"プロセスエラー報告に失敗: {monitor_error}")
+                
             return {
                 "query": query,
                 "response": f"エラーが発生しました: {str(e)}",
                 "success": False,
                 "error": str(e),
-                "generation_type": "error"
+                "generation_type": "error",
+                "process_time_ms": int((time.time() - start_time) * 1000)
             }
-    
+
     async def generate_stream_with_rag(
         self,
         query: str,
@@ -220,9 +365,78 @@ class RAGAIService:
         """
         RAGを使用したストリーミング生成
         """
+        process_id = None
+        start_time = time.time()
+        accumulated_content = ""
+        
         if not self.is_initialized:
             yield {"error": "RAG AI Service not initialized"}
             return
+        
+        # プロセス監視開始
+        try:
+            process_monitor = await get_process_monitor()
+            process_id = await process_monitor.register_process(
+                process_type="rag_stream_generation",
+                metadata={
+                    "query": query,
+                    "mode": mode,
+                    "model": model,
+                    "rag_enabled": self.enable_rag
+                }
+            )
+            await process_monitor.start_process(process_id)
+            yield {"status": "process_started", "process_id": process_id}
+        except Exception as e:
+            logger.warning(f"プロセス監視の開始に失敗: {e}")
+        
+        # キャッシュチェック
+        try:
+            cache_manager = await get_cache_manager()
+            cache_key = {
+                "operation": "rag_stream_generation",
+                "query": query,
+                "mode": mode,
+                "model": model,
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+                "context_length": context_length
+            }
+            
+            cache_hit, cached_result = await cache_manager.get_cache(cache_key)
+            if cache_hit and cached_result:
+                logger.info(f"キャッシュヒット: {query[:30]}...")
+                
+                # プロセス完了報告
+                if process_id:
+                    await process_monitor.complete_process(
+                        process_id,
+                        metadata_update={
+                            "cache_hit": True,
+                            "duration_ms": int((time.time() - start_time) * 1000)
+                        }
+                    )
+                
+                yield {
+                    "status": "cache_hit", 
+                    "message": "キャッシュから応答を取得しました", 
+                    "from_cache": True
+                }
+                
+                # キャッシュされた応答をフルコンテンツとして送信
+                yield {
+                    "content": cached_result.get("content", ""),
+                    "finish_reason": "cached",
+                    "generation_type": cached_result.get("generation_type", "unknown"),
+                    "rag_enabled": self.enable_rag,
+                    "sources": cached_result.get("sources", []),
+                    "from_cache": True,
+                    "is_first": True,
+                    "is_last": True
+                }
+                return
+        except Exception as e:
+            logger.warning(f"キャッシュチェックに失敗: {e}")
         
         try:
             # RAGコンテキストを生成
@@ -231,6 +445,13 @@ class RAGAIService:
             
             if self.enable_rag:
                 yield {"status": "searching", "message": "知識ベースを検索中..."}
+                
+                # プロセス進捗更新
+                if process_id:
+                    await process_monitor.update_progress(
+                        process_id, 0.2, 
+                        {"stage": "knowledge_base_search"}
+                    )
                 
                 context_result = await self.rag_system.generate_context(
                     query=query,
@@ -241,12 +462,27 @@ class RAGAIService:
                 if context_result.get("context"):
                     rag_context = context_result["context"]
                     rag_sources = context_result.get("sources", [])
+                    
+                    # プロセス進捗更新
+                    if process_id:
+                        await process_monitor.update_progress(
+                            process_id, 0.4, 
+                            {"stage": "context_generated", "sources_count": len(rag_sources)}
+                        )
+                    
                     yield {
                         "status": "context_found",
                         "message": f"関連する情報を{len(rag_sources)}件見つけました",
                         "sources": rag_sources
                     }
                 else:
+                    # プロセス進捗更新
+                    if process_id:
+                        await process_monitor.update_progress(
+                            process_id, 0.4, 
+                            {"stage": "no_context_found"}
+                        )
+                    
                     yield {"status": "no_context", "message": "関連する情報が見つかりませんでした"}
             
             # プロンプトを構築
@@ -261,6 +497,13 @@ class RAGAIService:
                 generation_type = "llm_only"
             
             yield {"status": "generating", "message": "回答を生成中..."}
+            
+            # プロセス進捗更新
+            if process_id:
+                await process_monitor.update_progress(
+                    process_id, 0.6, 
+                    {"stage": "llm_generation", "generation_type": generation_type}
+                )
             
             # LLMストリーミング生成
             if self.llm_service:
@@ -282,9 +525,68 @@ class RAGAIService:
                     # 最初のチャンクにソース情報を追加
                     if rag_sources and chunk.get("is_first", False):
                         enhanced_chunk["sources"] = rag_sources
+                        
+                        # プロセス進捗更新
+                        if process_id:
+                            await process_monitor.update_progress(
+                                process_id, 0.8, 
+                                {"stage": "generation_started"}
+                            )
+                    
+                    # 累積コンテンツを更新
+                    if "content" in chunk:
+                        accumulated_content += chunk["content"]
+                    
+                    # 最後のチャンクで進捗完了と結果をキャッシュ
+                    if chunk.get("is_last", False) and process_id:
+                        # キャッシュに保存する結果を作成
+                        cache_result = {
+                            "content": accumulated_content,
+                            "generation_type": generation_type,
+                            "sources": rag_sources,
+                            "model_used": chunk.get("model", model),
+                            "generated_at": time.time(),
+                            "process_time_ms": int((time.time() - start_time) * 1000)
+                        }
+                        
+                        # プロセス完了報告
+                        await process_monitor.complete_process(
+                            process_id,
+                            metadata_update={
+                                "duration_ms": int((time.time() - start_time) * 1000),
+                                "generation_type": generation_type,
+                                "source_count": len(rag_sources) if rag_sources else 0
+                            }
+                        )
+                        
+                        # キャッシュに結果を非同期で保存
+                        try:
+                            cache_manager = await get_cache_manager()
+                            cache_key = {
+                                "operation": "rag_stream_generation",
+                                "query": query,
+                                "mode": mode,
+                                "model": model,
+                                "max_tokens": max_tokens,
+                                "temperature": temperature,
+                                "context_length": context_length
+                            }
+                            asyncio.create_task(cache_manager.set_cache(cache_key, cache_result))
+                        except Exception as cache_error:
+                            logger.warning(f"ストリーミング結果のキャッシュに失敗: {cache_error}")
                     
                     yield enhanced_chunk
             else:
+                # プロセス失敗を報告
+                if process_id:
+                    await process_monitor.fail_process(
+                        process_id,
+                        error_message="LLM service unavailable",
+                        metadata_update={
+                            "duration_ms": int((time.time() - start_time) * 1000)
+                        }
+                    )
+                
                 yield {
                     "content": "LLMサービスが利用できません",
                     "finish_reason": "error",
@@ -294,6 +596,20 @@ class RAGAIService:
                 
         except Exception as e:
             logger.error(f"Error in RAG streaming generation: {e}")
+            
+            # エラーを報告
+            if process_id:
+                try:
+                    await process_monitor.fail_process(
+                        process_id,
+                        error_message=str(e),
+                        metadata_update={
+                            "duration_ms": int((time.time() - start_time) * 1000)
+                        }
+                    )
+                except Exception as monitor_error:
+                    logger.error(f"プロセスエラー報告に失敗: {monitor_error}")
+            
             yield {
                 "content": f"エラーが発生しました: {str(e)}",
                 "finish_reason": "error",
