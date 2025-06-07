@@ -120,15 +120,31 @@ class AIProcessMonitor:
             "timeout": [],
             "canceled": []
         }
-        
-        # 統計情報
+          # 統計情報
         self.stats = {
             "total_processes": 0,
             "completed_processes": 0,
             "failed_processes": 0,
             "timed_out_processes": 0,
             "avg_process_time_seconds": 0,
-            "active_processes": 0
+            "active_processes": 0,
+            
+            # 拡張統計情報
+            "max_process_time_seconds": 0,
+            "min_process_time_seconds": float('inf'),
+            "total_tokens_generated": 0,
+            "total_tokens_input": 0,
+            "cache_hits": 0,
+            "cache_misses": 0,
+            "last_24h_processes": 0,
+            "last_24h_success_rate": 0.0
+        }
+        
+        # パフォーマンス履歴
+        self.performance_history = {
+            "durations": [],  # 直近100件の処理時間
+            "timestamps": [],  # 直近100件の処理完了時刻
+            "process_types": {}  # プロセスタイプ別の統計
         }
         
         # ロック
@@ -253,7 +269,7 @@ class AIProcessMonitor:
             await self._emit_event("progress", process)
             
         logger.debug(f"プロセス進捗更新: {process_id}, 進捗: {progress:.2f}")
-
+        
     async def complete_process(self, process_id: str, 
                               metadata_update: Dict[str, Any] = None) -> None:
         """
@@ -279,6 +295,49 @@ class AIProcessMonitor:
             if metadata_update:
                 process.metadata.update(metadata_update)
                 
+                # キャッシュヒット統計の更新
+                if metadata_update.get("cache_hit") is True:
+                    self.stats["cache_hits"] += 1
+                elif metadata_update.get("cache_hit") is False:
+                    self.stats["cache_misses"] += 1
+                
+                # トークン統計の更新
+                if "total_tokens" in metadata_update:
+                    self.stats["total_tokens_generated"] += metadata_update.get("total_tokens", 0)
+                if "input_tokens" in metadata_update:
+                    self.stats["total_tokens_input"] += metadata_update.get("input_tokens", 0)
+            
+            # 処理時間の計算と記録
+            if process.start_time:
+                duration_seconds = (process.end_time - process.start_time).total_seconds()
+                
+                # パフォーマンス履歴に追加
+                self.performance_history["durations"].append(duration_seconds)
+                self.performance_history["timestamps"].append(process.end_time.timestamp())
+                
+                # 最大100件に制限
+                if len(self.performance_history["durations"]) > 100:
+                    self.performance_history["durations"].pop(0)
+                    self.performance_history["timestamps"].pop(0)
+                
+                # プロセスタイプ別の統計
+                process_type = process.process_type
+                if process_type not in self.performance_history["process_types"]:
+                    self.performance_history["process_types"][process_type] = {
+                        "count": 0,
+                        "total_time": 0,
+                        "avg_time": 0,
+                        "max_time": 0,
+                        "min_time": float('inf')
+                    }
+                    
+                type_stats = self.performance_history["process_types"][process_type]
+                type_stats["count"] += 1
+                type_stats["total_time"] += duration_seconds
+                type_stats["avg_time"] = type_stats["total_time"] / type_stats["count"]
+                type_stats["max_time"] = max(type_stats["max_time"], duration_seconds)
+                type_stats["min_time"] = min(type_stats["min_time"], duration_seconds)
+                
             # 統計情報の更新
             self.stats["completed_processes"] += 1
             self.stats["active_processes"] -= 1
@@ -292,8 +351,9 @@ class AIProcessMonitor:
             # イベントを発行
             await self._emit_event("completed", process)
             
-            # 平均処理時間の更新
+            # 平均処理時間の更新と24時間統計の更新
             self._update_avg_process_time()
+            self._update_24h_stats()
             
         logger.debug(f"プロセス完了: {process_id}")
 
@@ -569,11 +629,10 @@ class AIProcessMonitor:
             # 古い順にソート
             self.process_history.sort(key=lambda p: p.end_time)
             
-            # 超過分を削除
-            excess = len(self.process_history) - self.max_history_count
+            # 超過分を削除            excess = len(self.process_history) - self.max_history_count
             if excess > 0:
                 self.process_history = self.process_history[excess:]
-
+                
     def _update_avg_process_time(self) -> None:
         """平均処理時間を更新"""
         if not self.process_history:
@@ -591,6 +650,46 @@ class AIProcessMonitor:
         
         if process_times:
             self.stats["avg_process_time_seconds"] = sum(process_times) / len(process_times)
+            
+            # 最大・最小処理時間も更新
+            self.stats["max_process_time_seconds"] = max(process_times + [self.stats["max_process_time_seconds"]])
+            self.stats["min_process_time_seconds"] = min([t for t in process_times if t > 0] + 
+                                                        [self.stats["min_process_time_seconds"]] 
+                                                        if self.stats["min_process_time_seconds"] < float('inf') 
+                                                        else process_times)
+    
+    def _update_24h_stats(self) -> None:
+        """24時間統計情報を更新"""
+        try:
+            # 現在時刻からの24時間前のタイムスタンプ
+            now = datetime.now().timestamp()
+            day_ago = now - (24 * 60 * 60)  # 24時間 = 86400秒
+            
+            # 直近24時間のプロセス数カウント
+            recent_timestamps = [ts for ts in self.performance_history["timestamps"] if ts > day_ago]
+            self.stats["last_24h_processes"] = len(recent_timestamps)
+            
+            # 直近24時間の履歴から成功率を計算
+            if recent_timestamps:
+                recent_processes = []
+                
+                # 24時間以内のプロセスを履歴から取得
+                for process in self.process_history:
+                    if process.end_time and process.end_time.timestamp() > day_ago:
+                        recent_processes.append(process)
+                
+                # 成功と失敗をカウント
+                success_count = len([p for p in recent_processes if p.status == ProcessStatus.COMPLETED])
+                failed_count = len([p for p in recent_processes if p.status == ProcessStatus.FAILED])
+                
+                # 成功率を計算
+                if success_count + failed_count > 0:
+                    self.stats["last_24h_success_rate"] = success_count / (success_count + failed_count)
+                else:
+                    self.stats["last_24h_success_rate"] = 0.0
+        
+        except Exception as e:
+            logger.error(f"24時間統計の更新エラー: {e}")
 
 
 # デフォルトインスタンス

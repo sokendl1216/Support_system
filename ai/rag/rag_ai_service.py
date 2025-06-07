@@ -22,7 +22,6 @@ class RAGAIService:
     RAG統合AIサービス
     知識ベースを活用した検索拡張生成システム
     """
-    
     def __init__(self, config: Optional[Dict[str, Any]] = None):
         if config is None:
             # デフォルト設定を読み込み
@@ -34,11 +33,12 @@ class RAGAIService:
                 with open(config_path, 'r', encoding='utf-8') as f:
                     config = {"rag": json.load(f)}
             else:
-                config = {"rag": {}, "ai": {}}
+                config = {"rag": {}, "ai": {}, "cache": {}}
                 
         self.config = config
         self.rag_config = config.get("rag", {})
         self.ai_config = config.get("ai", {})
+        self.cache_config = config.get("cache", {})
         
         # RAGシステム
         self.rag_system = RAGSystem(self.rag_config)
@@ -49,10 +49,15 @@ class RAGAIService:
         # 統合設定
         self.enable_rag = self.rag_config.get("enable", True)
         self.fallback_to_llm = self.rag_config.get("fallback_to_llm", True)
+        
+        # キャッシュ設定
+        self.cache_enabled = self.cache_config.get("enabled", True)        self.cache_ttl_seconds = self.cache_config.get("ttl_seconds", 3600 * 24)  # デフォルト24時間
+        self.cache_max_size_mb = self.cache_config.get("max_size_mb", 500)  # デフォルト500MB
+        self.use_priority_cache = self.cache_config.get("use_priority", False)  # デフォルト無効
         self.context_template = self.rag_config.get("context_template", self._default_context_template())
         
         self.is_initialized = False
-    
+        
     def _default_context_template(self) -> str:
         """
         デフォルトのコンテキストテンプレート
@@ -65,22 +70,39 @@ class RAGAIService:
 質問: {query}
 
 参考情報を基に、正確で有用な回答を提供してください。参考情報に答えがない場合は、その旨を明記してください。"""
-    
+        
     async def initialize(self) -> bool:
         """
         RAG統合AIサービスの初期化
         """
         try:
-            logger.info("Initializing RAG AI Service...")
+            logger.info("RAG AIサービスを初期化中...")
+            
+            # キャッシュマネージャーを初期化
+            try:
+                # グローバルキャッシュマネージャーを初期化
+                from ..cache_manager import get_cache_manager
+                await get_cache_manager(
+                    enable_cache=self.cache_enabled,
+                    ttl_seconds=self.cache_ttl_seconds,
+                    max_cache_size_mb=self.cache_max_size_mb,
+                    use_priority=self.use_priority_cache
+                )
+                
+                cache_status = "有効" if self.cache_enabled else "無効"
+                priority_status = "有効" if self.use_priority_cache else "無効"
+                logger.info(f"キャッシュマネージャーを初期化: キャッシュ={cache_status}, 優先度={priority_status}")
+            except Exception as e:
+                logger.warning(f"キャッシュマネージャーの初期化エラー: {e}")
             
             # RAGシステムを初期化
             if self.enable_rag:
                 rag_ok = await self.rag_system.initialize()
                 if not rag_ok:
-                    logger.error("Failed to initialize RAG system")
+                    logger.error("RAGシステムの初期化に失敗")
                     if not self.fallback_to_llm:
                         return False
-                    logger.warning("Continuing without RAG (fallback enabled)")
+                    logger.warning("RAGなしで続行します（フォールバック有効）")
                     self.enable_rag = False
             
             # LLMサービスを初期化
@@ -95,18 +117,18 @@ class RAGAIService:
                 # プロバイダーの健康状態をチェック
                 if await ollama_provider.is_healthy():
                     self.llm_service = LLMServiceManager([ollama_provider])
-                    logger.info("LLM service initialized with Ollama provider")
+                    logger.info("LLMサービスをOllamaプロバイダーで初期化")
                 else:
-                    logger.error("Ollama provider is not healthy")
+                    logger.error("Ollamaプロバイダーが正常ではありません")
                     if not self.enable_rag:
                         return False
             except Exception as e:
-                logger.error(f"Failed to initialize LLM service: {e}")
+                logger.error(f"LLMサービス初期化エラー: {e}")
                 if not self.enable_rag:
                     return False
             
             self.is_initialized = True
-            logger.info("RAG AI Service initialized successfully")
+            logger.info("RAG AIサービスを正常に初期化しました")
             return True
             
         except Exception as e:
